@@ -1,0 +1,274 @@
+// #include <Arduino.h>
+
+#include <esp_now.h>
+#include <WiFi.h>
+
+#include <BLEDevice.h>
+#include <BLEServer.h>
+//#include <BLEUtils.h>
+#include <BLE2902.h>
+
+#define PIR_SENSOR_PIN 14
+#define LED_PIN 2
+
+const int cur_node = 0;  // Node reference number
+const int num_nodes = 2; // Node reference number
+unsigned long lastMessageTime = 0;
+const unsigned long messageInterval = 5000; // 5 seconds interval
+
+uint8_t nodes[5][6] = {
+    {0x88, 0x13, 0xbf, 0x69, 0xca, 0x68},
+    {0x0c, 0xb8, 0x15, 0x07, 0x43, 0x7c},
+    {0x1c, 0x69, 0x20, 0xe6, 0x27, 0x80},
+    {0xac, 0x15, 0x18, 0xed, 0x44, 0xcc},
+    {0x88, 0x13, 0xbf, 0x69, 0x9e, 0xfc}};
+// int num_nodes = sizeof(nodes) / sizeof(nodes[0]);
+// #2 : 1c:69:20:e6:27:80
+// #3 : ac:15:18:ed:44:cc
+// #4 : 88:13:bf:69:9e:fc
+//
+struct struct_message
+{
+  char msg[32];
+  int origin_node;
+  int current_node;
+};
+
+struct_message myData;
+esp_now_peer_info_t peerInfo;
+
+BLEServer *pServer = NULL;
+BLECharacteristic *pCharacteristic = NULL;
+BLEDescriptor *pDescr;
+BLE2902 *pBLE2902;
+
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+uint32_t value = 0;
+
+#define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+#define CHARACTERISTIC_UUID_2 "50c07f71-e239-4f5c-825e-2cc13e914778"
+
+class MyServerCallbacks : public BLEServerCallbacks
+{
+  void onConnect(BLEServer *pServer)
+  {
+    deviceConnected = true;
+  };
+
+  void onDisconnect(BLEServer *pServer)
+  {
+    deviceConnected = false;
+  }
+};
+
+void createBLEServer()
+{
+  // Create the BLE Device
+  BLEDevice::init("ESP32");
+
+  // Create the BLE Server
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  // Create the BLE Service
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  // Create a BLE Characteristic
+  pCharacteristic = pService->createCharacteristic(
+      CHARACTERISTIC_UUID,
+      BLECharacteristic::PROPERTY_NOTIFY);
+
+  // Create a BLE Descriptor
+
+  pDescr = new BLEDescriptor((uint16_t)0x2901);
+  pDescr->setValue("R3E Notification");
+  pCharacteristic->addDescriptor(pDescr);
+
+  pBLE2902 = new BLE2902();
+  pBLE2902->setNotifications(true);
+  pCharacteristic->addDescriptor(pBLE2902);
+
+  // Start the service
+  pService->start();
+
+  // Start advertising
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(false);
+  pAdvertising->setMinPreferred(0x0); // set value to 0x00 to not advertise this parameter
+  BLEDevice::startAdvertising();
+  Serial.println("Waiting a client connection to notify...");
+}
+
+void notifyBLEClient(uint32_t valueToNotify)
+{
+  // notify changed value
+  if (deviceConnected)
+  {
+    pCharacteristic->setValue(valueToNotify);
+    pCharacteristic->notify();
+    delay(1000);
+  }
+  // disconnecting
+  if (!deviceConnected && oldDeviceConnected)
+  {
+    delay(500);                  // give the bluetooth stack the chance to get things ready
+    pServer->startAdvertising(); // restart advertising
+    Serial.println("start advertising");
+    oldDeviceConnected = deviceConnected;
+  }
+  // connecting
+  if (deviceConnected && !oldDeviceConnected)
+  {
+    // do stuff here on connecting
+    oldDeviceConnected = deviceConnected;
+  }
+}
+
+void handleMotionDetection(uint32_t valueToNotify)
+{
+  unsigned long currentTime = millis();
+  if (currentTime - lastMessageTime > messageInterval)
+  {
+    lastMessageTime = currentTime;
+
+    digitalWrite(LED_PIN, HIGH);
+    delay(1000);
+    digitalWrite(LED_PIN, LOW);
+
+    Serial.print("ValueToNotify :");
+    Serial.println(valueToNotify);
+    Serial.print("cur_node :");
+    Serial.println(cur_node);
+
+    // Send message to previous node
+    // Set values to send
+    strcpy(myData.msg, "MOTION DETECTED");
+    myData.origin_node = valueToNotify;
+    myData.current_node = cur_node;
+    if (cur_node > 0 && valueToNotify >= cur_node) // dont send if on first node, dont sent if msg is not comming fromnext node in the network (reverse relay)
+    {
+      esp_err_t result = esp_now_send(nodes[cur_node - 1], (uint8_t *)&myData, sizeof(myData));
+      if (result == ESP_OK)
+      {
+        Serial.println("Sent to previous node with success");
+      }
+      else
+      {
+        Serial.println("Error sending data to previous node");
+      }
+    }
+    // Node 0 is a special node, has the first node in the chain it is responsable to notifu the client (smartphone app)
+    if (cur_node == 0)
+    {
+      notifyBLEClient(valueToNotify);
+    }
+  }
+}
+
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
+{
+  Serial.print("\r\nLast Packet Send Status:\t");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+}
+
+void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
+{
+  memcpy(&myData, incomingData, sizeof(myData));
+  Serial.print("Bytes received: ");
+  Serial.println(len);
+  Serial.print("Char: ");
+  Serial.println(myData.msg);
+  Serial.print("Origin Node: ");
+  Serial.println(myData.origin_node);
+  Serial.print("Current Node: ");
+  Serial.println(myData.current_node);
+  Serial.println();
+
+  // Relay the notification to previous Node
+  handleMotionDetection(myData.origin_node);
+}
+
+void addPeer(uint8_t *address)
+{
+  memcpy(peerInfo.peer_addr, address, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  if (esp_now_add_peer(&peerInfo) != ESP_OK)
+  {
+    Serial.println("Failed to add peer");
+    return;
+  }
+}
+
+void setup()
+{
+  Serial.begin(9600);
+  pinMode(PIR_SENSOR_PIN, INPUT);
+  pinMode(LED_PIN, OUTPUT);
+
+  // node 0 needs to notify the client app thru BLE
+  if (cur_node == 0)
+    createBLEServer();
+
+  Serial.print("nb of nodes : ");
+  Serial.println(num_nodes);
+
+  // Set device as a Wi-Fi Station
+  WiFi.mode(WIFI_STA);
+
+  // Init ESP-NOW
+  if (esp_now_init() != ESP_OK)
+  {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+
+  // Register send and receive callbacks
+  esp_now_register_send_cb(OnDataSent);
+  esp_now_register_recv_cb(OnDataRecv);
+
+  // Add peers
+  if (cur_node > 0)
+  {
+    addPeer(nodes[cur_node - 1]); // Add previous node as peer
+  }
+  if (cur_node < num_nodes - 1)
+  {
+    addPeer(nodes[cur_node + 1]); // Add next node as peer
+  }
+}
+
+void loop()
+{
+  // Set values to send
+  strcpy(myData.msg, "THIS IS A CHAR");
+  myData.origin_node = cur_node;
+  myData.current_node = cur_node;
+
+  // Send message to previous node
+  if (digitalRead(PIR_SENSOR_PIN) == HIGH)
+  {
+    Serial.println("sensor motion detected...");
+    handleMotionDetection(cur_node);
+  }
+
+  /*
+    // Send message to next node
+    if (cur_node < num_nodes - 1)
+    {
+      esp_err_t result = esp_now_send(nodes[cur_node + 1], (uint8_t *)&myData, sizeof(myData));
+      if (result == ESP_OK)
+      {
+        //Serial.println("Sent to next node with success");
+      }
+      else
+      {
+        //Serial.println("Error sending data to next node");
+      }
+    }*/
+
+  delay(2000);
+}
