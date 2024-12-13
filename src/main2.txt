@@ -561,17 +561,17 @@ void onDataReceived(const uint8_t *mac, const uint8_t *incomingData, int len)
     Serial.print("Bytes received: ");
     Serial.println(len);
     Serial.print("Char: ");
-    Serial.println(myData.msg);
+    Serial.println(myData.text);
     Serial.print("Origin Node: ");
-    Serial.println(myData.origin_node);
+    Serial.println(myData.originNode);
     Serial.print("Current Node: ");
-    Serial.println(myData.current_node);
+    Serial.println(myData.currentNode);
     Serial.println();
 
-    if (strcmp(myData.msg, "HEALTH CHECK") == 0)
+    if (strcmp(myData.text, "HEALTH CHECK") == 0)
     {
         // relay msg to the next Node
-        handleHealthCheck(myData.origin_node);
+        handleHealthCheck(myData.originNode);
     }
     else
     {
