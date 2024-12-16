@@ -47,7 +47,7 @@ uint8_t nodes[][6] = {DEVICE_5, DEVICE_6, DEVICE_1}; // List of nodes
 const int currentNode = 1;                           // Current node index
 const int totalNodes = 3;                            // Total number of nodes
 const int hubNode = 0;                               // Hub node index
-const bool enablePictureMode = true;                 // Enable picture mode
+const bool enablePictureMode = false;                // Enable picture mode
 unsigned long lastMessageTime = 0;
 const unsigned long messageInterval = 5000; // Interval between messages in milliseconds
 #define MAX_IMAGE_SIZE 1000000              // Maximum image size
@@ -448,19 +448,32 @@ void sendImageChunks(const uint8_t *peerAddress, uint8_t *imageData, uint32_t im
 {
   if (imageSize == 0)
     return;
+
+  /*
+  for (size_t i = 0; i < imageSize; i++)
+  {
+    Serial.printf("%02X ", imageData[i]);
+  }
+  Serial.println();
+  */
   uint32_t chunks = (imageSize + MAX_IMAGE_CHUNK_SIZE - 1) / MAX_IMAGE_CHUNK_SIZE; // Calculate the number of chunks
   Serial.printf("Chunkse: %d\n", chunks);
 
   for (uint32_t i = 0; i < chunks; i++)
   {
     ImageChunk chunk;
+
     chunk.chunkSize = (i == chunks - 1) ? (imageSize % MAX_IMAGE_CHUNK_SIZE) : MAX_IMAGE_CHUNK_SIZE;
     chunk.chunkIndex = i;
-    //Serial.printf("chunkSize: %d\n", chunk.chunkSize);
-    //Serial.printf("chunkIndex: %d\n", chunk.chunkIndex);
+    Serial.printf("chunkSize: %d\n", chunk.chunkSize);
+    Serial.printf("chunkIndex: %d\n", chunk.chunkIndex);
 
     memcpy(chunk.chunkData, imageData + (i * MAX_IMAGE_CHUNK_SIZE), chunk.chunkSize);
-
+    /*for (size_t i = 0; i < chunk.chunkSize; i++)
+    {
+      Serial.printf("%02X ", chunk.chunkData[i]);
+    }
+    Serial.println();*/
     /*if (esp_now_send(peerAddress, (uint8_t *)&chunk, sizeof(chunk)) != ESP_OK)
     {
       Serial.println("Error sending image chunk");
@@ -476,7 +489,7 @@ void sendImageChunks(const uint8_t *peerAddress, uint8_t *imageData, uint32_t im
     }
     else
     {
-      //Serial.printf("Chunk %d sent successfully\n", chunk.chunkIndex);
+      // Serial.printf("Chunk %d sent successfully\n", chunk.chunkIndex);
     }
 
     delay(100); // Adjust delay for stability
@@ -493,12 +506,11 @@ void sendDataToNextDevice(int8_t nextDeviceIndex, Message &receivedData)
   header.currentNode = currentNode;
   header.imageSize = receivedData.imageSize; // Example image size
 
-  //Serial.printf("Sending header: %s\n", header.text);
-  //Serial.printf("Sending img size: %d\n", header.imageSize);
+  Serial.printf("Sending header: %s\n", header.text);
+  Serial.printf("Sending img size: %d\n", header.imageSize);
 
   sendHeader(nodes[currentNode + nextDeviceIndex], header);
 
-  // uint8_t imageData[1024]; // Example image data
   sendImageChunks(nodes[currentNode + nextDeviceIndex], receivedData.imageData, header.imageSize);
 }
 
@@ -754,15 +766,39 @@ void onDataReceived(const uint8_t *mac, const uint8_t *incomingData, int len)
     receivedChunks = 0;
     Serial.print("Header received: ");
     Serial.println(receivedHeader.text);
+    Serial.println(receivedImageSize);
+    if (receivedImageSize == 0)
+    {
+      Serial.println("All data header received");
+      // Process the complete image data
+      Message myData;
+      myData.currentNode = receivedHeader.currentNode;
+      myData.originNode = receivedHeader.originNode;
+      strncpy(myData.text, receivedHeader.text, sizeof(receivedHeader.text));
+      myData.imageSize = 0;
+      if (strcmp(myData.text, "MOTION DETECTED") == 0)
+      {
+        if (currentNode == hubNode)
+        {
+          notifyBLEClient(myData.originNode);
+        }
+        else
+          sendDataToNextDevice(-1, myData);
+      }
+    }
   }
   else if (len == sizeof(ImageChunk))
   {
     ImageChunk chunk;
-    memcpy(&chunk, incomingData, sizeof(chunk));
-    memcpy(receivedImageData + (chunk.chunkIndex * MAX_IMAGE_CHUNK_SIZE), chunk.chunkData, chunk.chunkSize);
-    receivedChunks++;
-    //Serial.print("Chunk received: ");
-    //Serial.println(chunk.chunkIndex);
+    if (receivedImageSize > 0)
+    {
+      memcpy(&chunk, incomingData, sizeof(chunk));
+      memcpy(receivedImageData + (chunk.chunkIndex * MAX_IMAGE_CHUNK_SIZE), chunk.chunkData, chunk.chunkSize);
+      receivedChunks++;
+    }
+
+    Serial.print("Chunk received: ");
+    Serial.println(chunk.chunkIndex);
 
     // Check if all chunks are received
     if ((chunk.chunkIndex + 1) * MAX_IMAGE_CHUNK_SIZE >= receivedImageSize)
