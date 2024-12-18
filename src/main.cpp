@@ -44,14 +44,11 @@
 
 // Node Configuration
 uint8_t nodes[][6] = {DEVICE_5, DEVICE_6, DEVICE_1}; // List of nodes
-const int currentNode = 1;                           // Current node index
+const int currentNode = 2;                           // Current node index
 const int totalNodes = 3;                            // Total number of nodes
 const int hubNode = 0;                               // Hub node index
-const bool enablePictureMode = false;                // Enable picture mode
 unsigned long lastMessageTime = 0;
 const unsigned long messageInterval = 5000; // Interval between messages in milliseconds
-#define MAX_IMAGE_SIZE 1000000              // Maximum image size
-#define MAX_IMAGE_CHUNK_SIZE 220            // Chunk size to fit within ESP-NOW payload limits (240 bytes)
 
 // Data Structure for ESP-NOW messages
 struct Message
@@ -59,48 +56,6 @@ struct Message
   char text[32];   // Message text
   int originNode;  // Origin node index
   int currentNode; // Current node index
-
-  uint8_t *imageData; // Pointer to image data
-  uint32_t imageSize; // Size of the image data
-
-  // Constructor
-  Message()
-  {
-    imageData = (uint8_t *)malloc(MAX_IMAGE_SIZE);
-    if (imageData == NULL)
-    {
-      Serial.println("Memory allocation failed for imageData");
-    }
-    else
-    {
-      memset(imageData, 0, MAX_IMAGE_SIZE); // Initialize memory to zero
-    }
-  }
-
-  // Destructor
-  ~Message()
-  {
-    if (imageData != NULL)
-    {
-      free(imageData);
-      imageData = NULL;
-      Serial.println("Memory allocation is now free!");
-    }
-  }
-};
-struct MessageHeader
-{
-  char text[32];
-  int originNode;
-  int currentNode;
-  uint32_t imageSize;
-};
-
-struct ImageChunk
-{
-  uint8_t chunkData[MAX_IMAGE_CHUNK_SIZE]; // stay within the 250-byte limit
-  uint32_t chunkSize;
-  uint32_t chunkIndex;
 };
 
 // Message myData;
@@ -159,11 +114,11 @@ void blink(int count)
     // turn the LED on (HIGH is the voltage level)
     digitalWrite(LED_PIN, HIGH);
     // wait for a second
-    delay(500);
+    delay(300);
     // turn the LED off by making the voltage LOW
     digitalWrite(LED_PIN, LOW);
     // wait for a second
-    delay(500);
+    delay(300);
   }
 }
 
@@ -326,102 +281,6 @@ String generateFileName(uint32_t valueToNotify)
   return filename;
 }
 
-// Save the captured image to the SD card
-void saveImageToSD(Message &myData)
-{
-  // Ensure SD card is initialized
-  if (!SD_MMC.begin())
-  {
-    Serial.println("SD card mount failed.");
-    return; // Exit if SD card is not mounted
-  }
-
-  // Check if the imageData pointer is valid
-  if (myData.imageData == nullptr || myData.imageSize == 0)
-  {
-    Serial.println("No image data to save or invalid image size.");
-    return;
-  }
-
-  // Generate a file name based on the origin node
-  String path = "/" + generateFileName(myData.originNode) + ".jpg";
-  Serial.println("Saving to path: " + path);
-
-  // Open the file for writing
-  File file = SD_MMC.open(path, FILE_WRITE);
-  if (!file)
-  {
-    Serial.println("Failed to open file for writing.");
-    return;
-  }
-
-  // Write the image data to the file
-  size_t bytesWritten = file.write(myData.imageData, myData.imageSize);
-  if (bytesWritten != myData.imageSize)
-  {
-    Serial.println("Failed to write the entire image to the SD card.");
-    file.close();
-    return;
-  }
-
-  // Close the file after writing
-  file.close();
-  Serial.println("Image saved to SD card successfully.");
-}
-
-// Capture an image using the camera
-void captureImage(Message &myData)
-{
-  camera_fb_t *fb = esp_camera_fb_get();
-  if (!fb)
-  {
-    Serial.println("Camera capture failed");
-    return;
-  }
-
-  // Log the frame buffer pointer and its size for debugging
-  Serial.println("Frame buffer address: " + String((uintptr_t)fb));
-  Serial.println("Frame buffer size: " + String(fb->len));
-
-  // Ensure the image size does not exceed the maximum allowed size
-  if (fb->len > MAX_IMAGE_SIZE)
-  {
-    Serial.println("Captured image size exceeds maximum allowed size");
-    esp_camera_fb_return(fb); // Return the frame buffer before returning from function
-    return;
-  }
-
-  // If imageData is not already allocated or is too small, allocate memory
-  if (myData.imageData == NULL)
-  {
-    // Allocate the memory for image data
-    myData.imageData = (uint8_t *)malloc(MAX_IMAGE_SIZE);
-    if (myData.imageData == NULL)
-    {
-      Serial.println("Memory allocation failed for imageData");
-      esp_camera_fb_return(fb); // Return the frame buffer
-      return;
-    }
-  }
-  else
-  {
-    // Clear any previous data if the buffer was already allocated
-    memset(myData.imageData, 0, MAX_IMAGE_SIZE);
-  }
-
-  // Copy the image data into the struct
-  Serial.println("Saving picture in memory...");
-  memcpy(myData.imageData, fb->buf, fb->len); // Copy the image data to the struct
-  myData.imageSize = fb->len;                 // Set the image size
-
-  // Free the frame buffer after use
-  esp_camera_fb_return(fb);
-
-  // Log image size
-  Serial.println("Picture taken...");
-  Serial.println("Image size: " + String(fb->len));
-}
-
 // BLE server callbacks for connection management
 class MyServerCallbacks : public NimBLEServerCallbacks
 {
@@ -436,82 +295,19 @@ class MyServerCallbacks : public NimBLEServerCallbacks
   }
 };
 
-void sendHeader(const uint8_t *peerAddress, MessageHeader &header)
-{
-  if (esp_now_send(peerAddress, (uint8_t *)&header, sizeof(header)) != ESP_OK)
-  {
-    Serial.println("Error sending the header");
-  }
-}
-
-void sendImageChunks(const uint8_t *peerAddress, uint8_t *imageData, uint32_t imageSize)
-{
-  if (imageSize == 0)
-    return;
-
-  /*
-  for (size_t i = 0; i < imageSize; i++)
-  {
-    Serial.printf("%02X ", imageData[i]);
-  }
-  Serial.println();
-  */
-  uint32_t chunks = (imageSize + MAX_IMAGE_CHUNK_SIZE - 1) / MAX_IMAGE_CHUNK_SIZE; // Calculate the number of chunks
-  Serial.printf("Chunkse: %d\n", chunks);
-
-  for (uint32_t i = 0; i < chunks; i++)
-  {
-    ImageChunk chunk;
-
-    chunk.chunkSize = (i == chunks - 1) ? (imageSize % MAX_IMAGE_CHUNK_SIZE) : MAX_IMAGE_CHUNK_SIZE;
-    chunk.chunkIndex = i;
-    Serial.printf("chunkSize: %d\n", chunk.chunkSize);
-    Serial.printf("chunkIndex: %d\n", chunk.chunkIndex);
-
-    memcpy(chunk.chunkData, imageData + (i * MAX_IMAGE_CHUNK_SIZE), chunk.chunkSize);
-    /*for (size_t i = 0; i < chunk.chunkSize; i++)
-    {
-      Serial.printf("%02X ", chunk.chunkData[i]);
-    }
-    Serial.println();*/
-    /*if (esp_now_send(peerAddress, (uint8_t *)&chunk, sizeof(chunk)) != ESP_OK)
-    {
-      Serial.println("Error sending image chunk");
-    }
-    delay(100); // Small delay to ensure proper transmission*/
-    esp_err_t result = esp_now_send(peerAddress, (uint8_t *)&chunk, sizeof(chunk));
-
-    if (result != ESP_OK)
-    {
-      Serial.print("Error sending image chunk: ");
-      Serial.println(esp_err_to_name(result));
-      delay(500); // Longer delay to allow the queue to clear
-    }
-    else
-    {
-      // Serial.printf("Chunk %d sent successfully\n", chunk.chunkIndex);
-    }
-
-    delay(100); // Adjust delay for stability
-  }
-}
-
 void sendDataToNextDevice(int8_t nextDeviceIndex, Message &receivedData)
 {
+  Serial.println("sendDataToNextDevice ");
+
   if (currentNode + nextDeviceIndex < 0 || currentNode + nextDeviceIndex >= totalNodes)
     return;
-  MessageHeader header;
-  strcpy(header.text, receivedData.text);
-  header.originNode = receivedData.originNode;
-  header.currentNode = currentNode;
-  header.imageSize = receivedData.imageSize; // Example image size
 
-  Serial.printf("Sending header: %s\n", header.text);
-  Serial.printf("Sending img size: %d\n", header.imageSize);
-
-  sendHeader(nodes[currentNode + nextDeviceIndex], header);
-
-  sendImageChunks(nodes[currentNode + nextDeviceIndex], receivedData.imageData, header.imageSize);
+  if (esp_now_send(nodes[currentNode + nextDeviceIndex], (uint8_t *)&receivedData, sizeof(receivedData)) != ESP_OK)
+  {
+    Serial.println("Error sending the to next device");
+  }
+  else
+    Serial.println("Sent to next device with no errors");
 }
 
 // BLE characteristic callbacks for handling writes
@@ -527,9 +323,7 @@ class MyCharacteristicCallbacks : public NimBLECharacteristicCallbacks
     Message myData;
     myData.currentNode = currentNode;
     myData.originNode = currentNode;
-    // myData.imageData=null;
     strcpy(myData.text, "HEALTH CHECK");
-    myData.imageSize = 0;
 
     sendDataToNextDevice(1, myData);
   }
@@ -623,18 +417,6 @@ void notifyBLEClient(int node)
     motionCharacteristic->setValue(node); // Ensure motionCharacteristic is properly initialized
     motionCharacteristic->notify();       // Notify the connected BLE client
     delay(1000);                          // Add delay to avoid flooding the BLE client with notifications
-
-    // If picture mode is enabled, send the image file to the BLE client
-    /*
-    if (enablePictureMode)
-    {
-      String filename = "R3E" + String(currentNode) + "_" + String(imageCounter - 1);
-      String path = "/" + filename + ".jpg"; // Path to the image on the SD card
-      Serial.print("Sending file: " + path);
-
-      // Ensure this function is non-blocking and does not stall the loop
-      sendFileViaBLE(SD_MMC, path); // Function to send file via BLE
-    }*/
   }
 
   // Handle case when the device is disconnected and advertising needs to start
@@ -658,63 +440,32 @@ void notifyBLEClient(int node)
   delay(5000); // Long delay, may want to reduce or remove for real-time responsiveness
 }
 
-void sendCapturedImage()
-{
-  MessageHeader header;
-  strcpy(header.text, "MOTION DETECTED");
-  header.originNode = currentNode;
-  header.currentNode = currentNode;
-  if (!enablePictureMode)
-  {
-    Serial.println("Sending with no image");
-    header.imageSize = 0; // Example image size
-    sendHeader(nodes[currentNode - 1], header);
-    return;
-  }
-
-  camera_fb_t *fb = esp_camera_fb_get();
-  if (!fb)
-  {
-    Serial.println("Camera capture failed");
-    return;
-  }
-
-  Serial.println("Picture taken, sending via ESP-NOW...");
-
-  header.imageSize = fb->len; // Example image size
-
-  sendHeader(nodes[currentNode - 1], header);
-
-  // uint8_t imageData[1024]; // Example image data
-  sendImageChunks(nodes[currentNode - 1], fb->buf, header.imageSize);
-
-  esp_camera_fb_return(fb);
-  Serial.println("Image sent via ESP-NOW successfully");
-}
-
 void saveCapturedImage(const int node)
+{
 
-{ // Capture the picture
-  if (!enablePictureMode)
-    return;
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb)
   {
     Serial.println("Camera capture failed");
     return;
   }
-  Serial.println("Picture taken, saving on SD card..");
-  // Ensure SD card is initialized
-  if (!SD_MMC.begin())
-  {
-    Serial.println("SD card mount failed.");
-    return; // Exit if SD card is not mounted
-  }
+
+  Serial.println("Picture taken, saving on SD card...");
 
   // Check if the imageData pointer is valid
   if (fb->buf == nullptr || fb->len == 0)
   {
     Serial.println("No image data to save or invalid image size.");
+    esp_camera_fb_return(fb);
+    return;
+  }
+
+  // Check available space
+  uint64_t freeSpace = SD_MMC.totalBytes() - SD_MMC.usedBytes();
+  if (freeSpace < fb->len)
+  {
+    Serial.println("Not enough space on SD card.");
+    esp_camera_fb_return(fb);
     return;
   }
 
@@ -727,114 +478,57 @@ void saveCapturedImage(const int node)
   if (!file)
   {
     Serial.println("Failed to open file for writing.");
+    esp_camera_fb_return(fb);
     return;
   }
 
   // Write the image data to the file
   size_t bytesWritten = file.write(fb->buf, fb->len);
+  file.flush(); // Ensure data is written to the card
+
   if (bytesWritten != fb->len)
   {
     Serial.println("Failed to write the entire image to the SD card.");
     file.close();
+    esp_camera_fb_return(fb);
     return;
   }
 
-  // Close the file after writing
   file.close();
   Serial.println("Image saved to SD card successfully.");
+
+  // Free the frame buffer
+  esp_camera_fb_return(fb);
 }
 
 // Callback function for ESP-NOW data sent
 void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
 {
-  // Serial.print("\r\nLast Packet Send Status: ");
-  // Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+  //Serial.print("\r\nLast Packet Send Status: ");
+  //Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
 }
-//-----
-MessageHeader receivedHeader;
-uint8_t *receivedImageData = nullptr;
-uint32_t receivedImageSize = 0;
-uint32_t receivedChunks = 0;
 
 void onDataReceived(const uint8_t *mac, const uint8_t *incomingData, int len)
+// we will the header firts and then a seire a chunk for the file (image)
 {
-  if (len == sizeof(MessageHeader))
+  Serial.println("onDataReceived");
+
+  Message myData;
+  memcpy(&myData, incomingData, len);
+
+  if (strcmp(myData.text, "MOTION DETECTED") == 0)
   {
-    memcpy(&receivedHeader, incomingData, sizeof(MessageHeader));
-    receivedImageSize = receivedHeader.imageSize;
-    receivedImageData = (uint8_t *)malloc(receivedImageSize);
-    receivedChunks = 0;
-    Serial.print("Header received: ");
-    Serial.println(receivedHeader.text);
-    Serial.println(receivedImageSize);
-    if (receivedImageSize == 0)
+    if (currentNode == hubNode)
     {
-      Serial.println("All data header received");
-      // Process the complete image data
-      Message myData;
-      myData.currentNode = receivedHeader.currentNode;
-      myData.originNode = receivedHeader.originNode;
-      strncpy(myData.text, receivedHeader.text, sizeof(receivedHeader.text));
-      myData.imageSize = 0;
-      if (strcmp(myData.text, "MOTION DETECTED") == 0)
-      {
-        if (currentNode == hubNode)
-        {
-          notifyBLEClient(myData.originNode);
-        }
-        else
-          sendDataToNextDevice(-1, myData);
-      }
+      notifyBLEClient(myData.originNode);
     }
+    else
+      sendDataToNextDevice(-1, myData);
   }
-  else if (len == sizeof(ImageChunk))
-  {
-    ImageChunk chunk;
-    if (receivedImageSize > 0)
-    {
-      memcpy(&chunk, incomingData, sizeof(chunk));
-      memcpy(receivedImageData + (chunk.chunkIndex * MAX_IMAGE_CHUNK_SIZE), chunk.chunkData, chunk.chunkSize);
-      receivedChunks++;
-    }
-
-    Serial.print("Chunk received: ");
-    Serial.println(chunk.chunkIndex);
-
-    // Check if all chunks are received
-    if ((chunk.chunkIndex + 1) * MAX_IMAGE_CHUNK_SIZE >= receivedImageSize)
-    {
-      Serial.println("All data received");
-      // Process the complete image data
-      Message myData;
-      myData.currentNode = receivedHeader.currentNode;
-      myData.originNode = receivedHeader.originNode;
-      // myData.text = receivedHeader.text;
-      strncpy(myData.text, receivedHeader.text, sizeof(receivedHeader.text));
-      myData.imageSize = receivedImageSize;
-      myData.imageData = receivedImageData;
-
-      if (strcmp(myData.text, "MOTION DETECTED") == 0)
-      {
-        if (currentNode == hubNode)
-        {
-          saveImageToSD(myData);
-          notifyBLEClient(myData.originNode);
-        }
-        else
-          sendDataToNextDevice(-1, myData);
-      }
-    }
-  }
-  if (strcmp(receivedHeader.text, "HEALTH CHECK") == 0)
+  if (strcmp(myData.text, "HEALTH CHECK") == 0)
   {
     Serial.println("Handling HC");
     blink(3);
-    Message myData;
-    myData.currentNode = receivedHeader.currentNode;
-    myData.originNode = receivedHeader.originNode;
-    // myData.text = receivedHeader.text;
-    strncpy(myData.text, receivedHeader.text, sizeof(receivedHeader.text));
-    myData.imageSize = 0;
     sendDataToNextDevice(1, myData);
   }
 }
@@ -859,7 +553,7 @@ void setup()
   pinMode(PIR_SENSOR_PIN, INPUT);
   pinMode(LED_PIN, OUTPUT);
 
-  if (enablePictureMode)
+  if (false)
   {
     initializeCameraConfig();
     esp_err_t err = esp_camera_init(&cameraConfig);
@@ -953,22 +647,18 @@ void loop()
       lastMessageTime = currentTime;
       Serial.println("Sensor motion detected...begin loop");
       blink(1);
-      // digitalWrite(LED_PIN, HIGH);
-      // delay(1000);
-      // digitalWrite(LED_PIN, LOW);
       if (currentNode == hubNode)
       {
-
-        saveCapturedImage(currentNode);
         notifyBLEClient(currentNode);
       }
       else
-        sendCapturedImage();
-      /*Message myData; // Constructor automatically called here
-      myData.currentNode = currentNode;
-      handleMotionDetection(myData);
-      Serial.print("Free heap: ");
-      Serial.println(ESP.getFreeHeap());*/
+      {
+        Message myData;
+        strcpy(myData.text, "MOTION DETECTED");
+        myData.currentNode = currentNode;
+        myData.originNode = currentNode;
+        sendDataToNextDevice(-1, myData);
+      };
 
       Serial.println("Sensor motion detected...end of loop");
     }
