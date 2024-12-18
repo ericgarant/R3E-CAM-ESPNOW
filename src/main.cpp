@@ -310,22 +310,37 @@ void sendDataToNextDevice(int8_t nextDeviceIndex, Message &receivedData)
     Serial.println("Sent to next device with no errors");
 }
 
-// BLE characteristic callbacks for handling writes
 class MyCharacteristicCallbacks : public NimBLECharacteristicCallbacks
 {
   void onWrite(NimBLECharacteristic *pCharacteristic)
   {
     std::string value = pCharacteristic->getValue();
-    Serial.print("Value written: ");
-    Serial.println(value.c_str());
-    blink(3);
 
-    Message myData;
-    myData.currentNode = currentNode;
-    myData.originNode = currentNode;
-    strcpy(myData.text, "HEALTH CHECK");
+    if (!value.empty())
+    {
 
-    sendDataToNextDevice(1, myData);
+      int targetNode = (int)value[0];
+      Serial.println(targetNode);
+
+      if (targetNode == currentNode)
+        // we have reached our target
+        blink(5);
+      else
+        blink(3);
+
+      // Prepare the message
+      Message myData;
+      myData.currentNode = currentNode;
+      myData.originNode = targetNode;
+      strcpy(myData.text, "HEALTH CHECK");
+
+      // Send the data to the next device
+      sendDataToNextDevice(1, myData);
+    }
+    else
+    {
+      Serial.println("Received empty or invalid value");
+    }
   }
 };
 
@@ -504,8 +519,8 @@ void saveCapturedImage(const int node)
 // Callback function for ESP-NOW data sent
 void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
 {
-  //Serial.print("\r\nLast Packet Send Status: ");
-  //Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+  // Serial.print("\r\nLast Packet Send Status: ");
+  // Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
 }
 
 void onDataReceived(const uint8_t *mac, const uint8_t *incomingData, int len)
@@ -528,7 +543,11 @@ void onDataReceived(const uint8_t *mac, const uint8_t *incomingData, int len)
   if (strcmp(myData.text, "HEALTH CHECK") == 0)
   {
     Serial.println("Handling HC");
-    blink(3);
+    if (myData.originNode == currentNode)
+      // we have reached our target
+      blink(5);
+    else
+      blink(3);
     sendDataToNextDevice(1, myData);
   }
 }
