@@ -44,10 +44,10 @@
 
 // Node Configuration
 uint8_t nodes[][6] = {DEVICE_5, DEVICE_6, DEVICE_1}; // List of nodes
-const int currentNode = 1;                           // Current node index
+const int currentNode = 0;                           // Current node index
 const int totalNodes = 3;                            // Total number of nodes
 const int hubNode = 0;                               // Hub node index
-unsigned long lastMessageTime = 0;
+unsigned long lastMessageTime = 2;
 const unsigned long messageInterval = 5000; // Interval between messages in milliseconds
 #define MAX_IMAGE_SIZE 1000000              // Maximum image size
 #define CHUNK_SIZE 200                      // Chunk size to fit within ESP-NOW payload limits (240 bytes)
@@ -503,7 +503,6 @@ void sendNextChunk()
   Serial.printf("Sending chunk %d, size: %d\n", currentChunkIndex, chunk.chunkSize);
 
   esp_err_t result = esp_now_send(nodes[currentNode - 1], (uint8_t *)&chunk, sizeof(ImageChunk));
-  Serial.println(sendingChunk);
 
   if (result != ESP_OK)
   {
@@ -575,13 +574,12 @@ void sendCapturedImage()
   // sendingChunk = false;
   esp_camera_fb_return(fb); // Free the frame buffer after sending all chunks
   Serial.println("Image sent successfully2");
-  Serial.println(sendingChunk);
 }
 
 // ESP-NOW send callback function
 void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
 {
-  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Chunk sent successfully" : "Chunk send failed");
+  // Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Chunk sent successfully" : "Chunk send failed");
   if (!sendingChunk)
     return;
 
@@ -620,21 +618,21 @@ uint32_t totalBytesReceived = 0; // Track total bytes received
 void onDataReceived(const uint8_t *mac, const uint8_t *incomingData, int len)
 // we will the header firts and then a seire a chunk for the file (image)
 {
-  //Serial.println("onDataReceived");
-  //Serial.printf("sizeof Message: %d, len :%d\n", sizeof(Message), len);
-  //Serial.printf("sizeof ImageChunk: %d, len :%d\n", sizeof(ImageChunk), len);
+  // Serial.println("onDataReceived");
+  // Serial.printf("sizeof Message: %d, len :%d\n", sizeof(Message), len);
+  // Serial.printf("sizeof ImageChunk: %d, len :%d\n", sizeof(ImageChunk), len);
 
   if (len == sizeof(ImageChunk))
   {
-    sendingChunk = true;
+    // sendingChunk = true;
     ImageChunk chunk;
     int forwardRetryCount = 0;
     memcpy(&chunk, incomingData, len);
-    //Serial.printf("chunkSize: %d\n", chunk.chunkSize);
-    //Serial.printf("chunkIndex: %d\n", chunk.chunkIndex);
+    // Serial.printf("chunkSize: %d\n", chunk.chunkSize);
+    // Serial.printf("chunkIndex: %d\n", chunk.chunkIndex);
     if (!receivingImage)
     {
-      //Serial.println("Allocating memory for image buffer");
+      // Serial.println("Allocating memory for image buffer");
       receivingImage = true;
       imageRecvBuffer = (uint8_t *)malloc(MAX_IMAGE_SIZE);
       totalBytesReceived = 0;
@@ -656,11 +654,13 @@ void onDataReceived(const uint8_t *mac, const uint8_t *incomingData, int len)
       {
         // Send via BLE to phone
         Serial.println("Forwarding image to BLE");
+        Serial.printf("Bytes received: %d; expected: %d\n", totalBytesReceived, chunk.fileSize);
       }
       else
       {
         // forward it to the previous device
         Serial.println("Forwarding image to next device");
+        Serial.println(sendingChunk);
 
         imageBuffer = imageRecvBuffer;
         imageSize = totalBytesReceived;
@@ -676,7 +676,7 @@ void onDataReceived(const uint8_t *mac, const uint8_t *incomingData, int len)
         Serial.printf("Fwd Last chunk size: %d bytes\n", lastChunkSize);
 
         // Start sending the first chunk
-        //sendNextChunk(); ///next step !!!!!
+        sendNextChunk(); /// next step !!!!!
       }
       // cleanup
       if (imageRecvBuffer != NULL)
@@ -838,7 +838,7 @@ void setup()
 
 void loop()
 {
-  if (digitalRead(PIR_SENSOR_PIN) == HIGH)
+  if (digitalRead(PIR_SENSOR_PIN) == HIGH && !sendingChunk)
   {
     unsigned long currentTime = millis();
     if (currentTime - lastMessageTime > messageInterval)
