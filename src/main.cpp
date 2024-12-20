@@ -5,6 +5,7 @@
 #include <esp_camera.h>
 #include <sd_read_write.h>
 #include <SD_MMC.h>
+#include <esp_crc.h>
 
 // Pin Definitions
 #define PIR_SENSOR_PIN 33 // PIR sensor pin
@@ -43,14 +44,16 @@
 #define DEVICE_6 {0x10, 0x06, 0x1c, 0xd6, 0x46, 0xd8}
 
 // Node Configuration
-uint8_t nodes[][6] = {DEVICE_5, DEVICE_6, DEVICE_1}; // List of nodes
+uint8_t nodes[][6] = {DEVICE_5, DEVICE_1, DEVICE_6}; // List of nodes
+//==============CHANGE THESE VALUE FOR EACH DEVICE ===========================
 const int currentNode = 0;                           // Current node index
-const int totalNodes = 3;                            // Total number of nodes
+const int totalNodes = 1;                            // Total number of nodes
+//============================================================================
 const int hubNode = 0;                               // Hub node index
 unsigned long lastMessageTime = 2;
 const unsigned long messageInterval = 5000; // Interval between messages in milliseconds
 #define MAX_IMAGE_SIZE 1000000              // Maximum image size
-#define CHUNK_SIZE 200                      // Chunk size to fit within ESP-NOW payload limits (240 bytes)
+#define CHUNK_SIZE 150                      // Chunk size to fit within ESP-NOW payload limits (240 bytes)
 #define MAX_RETRIES 5
 
 // Data Structure for ESP-NOW messages
@@ -67,6 +70,7 @@ struct ImageChunk
   uint32_t chunkSize;
   uint32_t chunkIndex;
   uint32_t fileSize;
+  uint32_t checksum; // Checksum field
 };
 // Global variables to manage image sending state
 uint8_t *imageBuffer = nullptr; // Pointer to the image buffer
@@ -96,8 +100,24 @@ int imageCounter = 0;
 #define HEALTH_CHECK_CHARACTERISTIC_UUID "50c07f71-e239-4f5c-825e-2cc13e914778"
 #define PICTURE_CHARACTERISTIC_UUID "0193b6d1-4e1b-745d-ac16-ba9af8fbb405"
 
+uint8_t *imageRecvBuffer = nullptr;
+bool receivingImage = false;
+uint32_t totalBytesReceived = 0; // Track total bytes received
+
+void processImageChunk(const ImageChunk &chunk);
+void finalizeImageReception(const ImageChunk &chunk);
+void saveImageToSDCard(const uint8_t *buffer, uint32_t fileSize);
+void forwardImageToNextDevice();
+void processMessage(const Message &myData);
+void sendCapturedImage();
+
 // Camera Configuration
 camera_config_t cameraConfig;
+
+uint32_t calculateCRC32(const uint8_t *data, size_t length)
+{
+  return esp_crc32_le(0, data, length);
+}
 
 // Initialize camera configuration
 void initializeCameraConfig()
@@ -316,7 +336,7 @@ class MyServerCallbacks : public NimBLEServerCallbacks
   }
 };
 
-void sendDataToNextDevice(int8_t nextDeviceIndex, Message &receivedData)
+void sendDataToNextDevice(int8_t nextDeviceIndex, const Message &receivedData)
 {
   Serial.println("sendDataToNextDevice ");
   // sendingChunk = false;
@@ -345,8 +365,11 @@ class MyCharacteristicCallbacks : public NimBLECharacteristicCallbacks
       Serial.println(targetNode);
 
       if (targetNode == currentNode)
+      {
         // we have reached our target
         blink(5);
+        sendCapturedImage();
+      }
       else
         blink(3);
 
@@ -392,6 +415,7 @@ void createBLEServer()
   pictureCharacteristic = service->createCharacteristic(
       PICTURE_CHARACTERISTIC_UUID,
       NIMBLE_PROPERTY::NOTIFY);
+  pictureCharacteristic->setValue("No data so far");
 
   // Start the service
   service->start();
@@ -408,6 +432,44 @@ void createBLEServer()
 // Send a file via BLE in chunks
 void sendFileViaBLE(fs::FS &fs, String path)
 {
+  //----
+  Serial.printf("Reading file: %s\n", path);
+  File file = fs.open(path);
+  if (!file)
+  {
+    Serial.println("Failed to open file for reading");
+    return;
+  }
+
+  const size_t chunkSize = 200; // Size of each chunk (can adjust depending on BLE MTU)
+  uint8_t buffer[chunkSize];
+  size_t bytesRead = 0;
+  size_t totalBytesSent = 0;
+  size_t totalFileSize = file.size(); // Get total file size for progress reporting
+  Serial.printf("File Size : %d\n", totalFileSize);
+
+  Serial.print("Read from file: ");
+  while (file.available())
+  {
+    //Serial.print(".");
+    bytesRead = file.read(buffer, chunkSize);           // Read chunk from file
+    pictureCharacteristic->setValue(buffer, bytesRead); // Set value to notify
+    pictureCharacteristic->notify();                    // Send notification
+
+    totalBytesSent += bytesRead; // Track bytes sent for progress
+    float progress = (float)totalBytesSent / totalFileSize * 100.0f;
+    Serial.printf("Sending file: %.2f%%\n", progress); // Display progress (optional)
+
+    delay(50); // Optional delay to avoid flooding the BLE client
+  }
+  file.close(); // Close the file when done
+  Serial.println("File sent via BLE successfully");
+}
+
+/*
+void sendFileViaBLE(fs::FS &fs, String path)
+{
+  //----
   Serial.printf("Reading file: %s\n", path);
   File file = fs.open(path);
   if (!file)
@@ -421,10 +483,12 @@ void sendFileViaBLE(fs::FS &fs, String path)
   size_t bytesRead = 0;
   size_t totalBytesSent = 0;
   size_t totalFileSize = file.size(); // Get total file size for progress reporting
+  Serial.printf("File Size : %d\n", totalFileSize);
 
-  // Read and send file in chunks
+  Serial.print("Read from file: ");
   while (file.available())
   {
+    Serial.print(".");
     bytesRead = file.read(buffer, chunkSize);           // Read chunk from file
     pictureCharacteristic->setValue(buffer, bytesRead); // Set value to notify
     pictureCharacteristic->notify();                    // Send notification
@@ -435,10 +499,9 @@ void sendFileViaBLE(fs::FS &fs, String path)
 
     delay(50); // Optional delay to avoid flooding the BLE client
   }
-
   file.close(); // Close the file when done
   Serial.println("File sent via BLE successfully");
-}
+}*/
 
 // Notify the BLE client with the given value
 void notifyBLEClient(int node)
@@ -499,6 +562,7 @@ void sendNextChunk()
   chunk.fileSize = imageSize;
 
   memcpy(chunk.chunkData, imageBuffer + (currentChunkIndex * CHUNK_SIZE), chunk.chunkSize);
+  chunk.checksum = calculateCRC32(chunk.chunkData, chunk.chunkSize);
 
   Serial.printf("Sending chunk %d, size: %d\n", currentChunkIndex, chunk.chunkSize);
 
@@ -552,6 +616,8 @@ void sendCapturedImage()
   if (currentNode == hubNode)
   {
     // Send via BLE to phone
+    Serial.printf("Image size: %d bytes\n", fb->len);
+    saveImageToSDCard(fb->buf, fb->len);
   }
   else
   {
@@ -573,13 +639,13 @@ void sendCapturedImage()
   }
   // sendingChunk = false;
   esp_camera_fb_return(fb); // Free the frame buffer after sending all chunks
-  Serial.println("Image sent successfully2");
+  //Serial.println("Image sent successfully2");
 }
 
 // ESP-NOW send callback function
 void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
 {
-  // Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Chunk sent successfully" : "Chunk send failed");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Chunk sent successfully" : "Chunk send failed");
   if (!sendingChunk)
     return;
 
@@ -611,114 +677,159 @@ void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
   }
 }
 
-uint8_t *imageRecvBuffer = nullptr;
-bool receivingImage = false;
-uint32_t totalBytesReceived = 0; // Track total bytes received
-
+// Main onDataReceived function
 void onDataReceived(const uint8_t *mac, const uint8_t *incomingData, int len)
-// we will the header firts and then a seire a chunk for the file (image)
 {
-  // Serial.println("onDataReceived");
-  // Serial.printf("sizeof Message: %d, len :%d\n", sizeof(Message), len);
-  // Serial.printf("sizeof ImageChunk: %d, len :%d\n", sizeof(ImageChunk), len);
-
   if (len == sizeof(ImageChunk))
   {
-    // sendingChunk = true;
     ImageChunk chunk;
-    int forwardRetryCount = 0;
     memcpy(&chunk, incomingData, len);
-    // Serial.printf("chunkSize: %d\n", chunk.chunkSize);
-    // Serial.printf("chunkIndex: %d\n", chunk.chunkIndex);
-    if (!receivingImage)
+    // Verify the checksum
+    uint32_t calculatedChecksum = calculateCRC32(chunk.chunkData, chunk.chunkSize);
+    if (calculatedChecksum != chunk.checksum)
     {
-      // Serial.println("Allocating memory for image buffer");
-      receivingImage = true;
-      imageRecvBuffer = (uint8_t *)malloc(MAX_IMAGE_SIZE);
-      totalBytesReceived = 0;
+      Serial.printf("Checksum mismatch! Received: %u, Calculated: %u\n", chunk.checksum, calculatedChecksum);
+      Serial.println("Chunk data corrupted. Requesting resend...");
+      return;
     }
-
-    //---- forward it the previous device
-    // Copy chunk data into the buffer at the correct position
-    memcpy(imageRecvBuffer + (chunk.chunkIndex * CHUNK_SIZE), chunk.chunkData, chunk.chunkSize);
-    totalBytesReceived += chunk.chunkSize;
-
-    if (chunk.chunkSize < CHUNK_SIZE)
-    {
-      // we are done receiving the file data
-      Serial.printf("File reveiced complete: %d\n", totalBytesReceived);
-      receivingImage = false;
-      // process the image
-      // senid it to the nextdevice or the BLE
-      if (currentNode == hubNode)
-      {
-        // Send via BLE to phone
-        Serial.println("Forwarding image to BLE");
-        Serial.printf("Bytes received: %d; expected: %d\n", totalBytesReceived, chunk.fileSize);
-      }
-      else
-      {
-        // forward it to the previous device
-        Serial.println("Forwarding image to next device");
-        Serial.println(sendingChunk);
-
-        imageBuffer = imageRecvBuffer;
-        imageSize = totalBytesReceived;
-        totalChunks = imageSize / CHUNK_SIZE;
-        lastChunkSize = imageSize % CHUNK_SIZE;
-        currentChunkIndex = 0;
-        retryCount = 0;
-
-        sendingChunk = true;
-
-        Serial.printf("Bytes received: %d; expected: %d\n", totalBytesReceived, chunk.fileSize);
-        Serial.printf("Fwd total chunks: %d\n", totalChunks);
-        Serial.printf("Fwd Last chunk size: %d bytes\n", lastChunkSize);
-
-        // Start sending the first chunk
-        sendNextChunk(); /// next step !!!!!
-      }
-      // cleanup
-      if (imageRecvBuffer != NULL)
-      {
-        // sendingChunk = false;
-        free(imageRecvBuffer);
-        imageRecvBuffer = NULL;
-        Serial.println("Memory allocation  for imageRecvBuffer is now free!");
-      }
-    }
-
-    //----
-
+    processImageChunk(chunk);
     return;
   }
+
   if (len == sizeof(Message))
   {
-    Serial.println("Processing Message... ");
-
     Message myData;
     memcpy(&myData, incomingData, len);
+    processMessage(myData);
+  }
+}
 
-    if (strcmp(myData.text, "MOTION DETECTED") == 0)
+// Helper function to process incoming image chunks
+void processImageChunk(const ImageChunk &chunk)
+{
+  if (!receivingImage)
+  {
+    receivingImage = true;
+    imageRecvBuffer = (uint8_t *)malloc(MAX_IMAGE_SIZE);
+    totalBytesReceived = 0;
+  }
+
+  memcpy(imageRecvBuffer + (chunk.chunkIndex * CHUNK_SIZE), chunk.chunkData, chunk.chunkSize);
+  totalBytesReceived += chunk.chunkSize;
+
+  if (chunk.chunkSize < CHUNK_SIZE)
+  {
+    finalizeImageReception(chunk);
+  }
+}
+
+// Finalize the image reception and decide what to do with the image
+void finalizeImageReception(const ImageChunk &chunk)
+{
+  Serial.printf("File received complete: %d\n", totalBytesReceived);
+  receivingImage = false;
+
+  if (currentNode == hubNode)
+  {
+    // Send image via BLE to phone
+    Serial.println("Forwarding image to BLE");
+    Serial.printf("Bytes received: %d; expected: %d\n", totalBytesReceived, chunk.fileSize);
+    saveImageToSDCard(imageRecvBuffer, chunk.fileSize);
+  }
+  else
+  {
+    // Forward image to the next device
+    forwardImageToNextDevice();
+  }
+
+  // Free memory after processing
+  if (imageRecvBuffer != nullptr)
+  {
+    free(imageRecvBuffer);
+    imageRecvBuffer = nullptr;
+    Serial.println("Memory allocation for imageRecvBuffer is now free!");
+  }
+}
+
+// Save the received image to the SD card
+void saveImageToSDCard(const uint8_t *buffer, uint32_t fileSize)
+{
+  if (buffer == nullptr || fileSize == 0)
+  {
+    Serial.println("No image data to save or invalid image size.");
+    return;
+  }
+
+  String path = "/" + generateFileName(999) + ".jpg";
+  Serial.println("Saving to path: " + path);
+
+  File file = SD_MMC.open(path, FILE_WRITE);
+  if (!file)
+  {
+    Serial.println("Failed to open file for writing.");
+    return;
+  }
+
+  size_t bytesWritten = file.write(buffer, fileSize);
+  if (bytesWritten != fileSize)
+  {
+    Serial.println("Failed to write the entire image to the SD card.");
+  }
+  else
+  {
+    Serial.println("Image saved to SD card successfully.");
+  }
+  file.close();
+  delay(1000);
+  sendFileViaBLE(SD_MMC, path);
+}
+
+// Forward the received image to the next device
+void forwardImageToNextDevice()
+{
+  Serial.println("Forwarding image to next device");
+
+  imageBuffer = imageRecvBuffer;
+  imageSize = totalBytesReceived;
+  totalChunks = imageSize / CHUNK_SIZE;
+  lastChunkSize = imageSize % CHUNK_SIZE;
+  currentChunkIndex = 0;
+  retryCount = 0;
+  sendingChunk = true;
+
+  Serial.printf("Bytes received: %d\n", imageSize);
+  Serial.printf("Fwd total chunks: %d\n", totalChunks);
+  Serial.printf("Fwd last chunk size: %d bytes\n", lastChunkSize);
+
+  sendNextChunk();
+}
+void processMessage(const Message &myData)
+{
+  Serial.println("Processing Message...");
+
+  if (strcmp(myData.text, "MOTION DETECTED") == 0)
+  {
+    if (currentNode == hubNode)
     {
-      if (currentNode == hubNode)
-      {
-        notifyBLEClient(myData.originNode);
-      }
-      else
-        sendDataToNextDevice(-1, myData);
+      notifyBLEClient(myData.originNode);
     }
-    if (strcmp(myData.text, "HEALTH CHECK") == 0)
+    else
     {
-      Serial.println("Handling HC");
-      if (myData.originNode == currentNode)
-      {
-        // we have reached our target
-        blink(5);
-        sendCapturedImage();
-      }
-      else
-        blink(3);
+      sendDataToNextDevice(-1, myData);
+    }
+  }
+  else if (strcmp(myData.text, "HEALTH CHECK") == 0)
+  {
+    Serial.println("Handling HC");
+
+    if (myData.originNode == currentNode)
+    {
+      blink(5);
+      sendCapturedImage();
+    }
+    else
+    {
+      blink(3);
       sendDataToNextDevice(1, myData);
     }
   }
@@ -752,15 +863,9 @@ void setup()
     return;
   }
 
-  if (false)
+  if (true)
   {
-    initializeCameraConfig();
-    esp_err_t err = esp_camera_init(&cameraConfig);
-    if (err != ESP_OK)
-    {
-      Serial.printf("Camera init failed with error 0x%x", err);
-      return;
-    }
+
     if (currentNode == hubNode)
     {
       SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
@@ -801,6 +906,7 @@ void setup()
       listDirectory(SD_MMC, "/", 2);
       writeFile(SD_MMC, "/hello.txt", "Hello ");
       appendFile(SD_MMC, "/hello.txt", "World!\n");
+      readFile(SD_MMC, "/hello.txt");
     }
   }
 
@@ -838,7 +944,9 @@ void setup()
 
 void loop()
 {
-  if (digitalRead(PIR_SENSOR_PIN) == HIGH && !sendingChunk)
+  // if (digitalRead(PIR_SENSOR_PIN) == HIGH && !sendingChunk)
+  if (digitalRead(PIR_SENSOR_PIN) == HIGH)
+
   {
     unsigned long currentTime = millis();
     if (currentTime - lastMessageTime > messageInterval)
