@@ -34,7 +34,7 @@
 #define SD_MMC_CLK 14
 #define SD_MMC_D0 2
 
-// MAC Addresses for ESP-NOW communication
+// MAC Addresses for ESP-NOW communication (Replace with your actual MAC addresses)
 #define DEVICE_0 {0x88, 0x13, 0xbf, 0x69, 0xca, 0x68}
 #define DEVICE_1 {0x0c, 0xb8, 0x15, 0x07, 0x43, 0x7c}
 #define DEVICE_2 {0x1c, 0x69, 0x20, 0xe6, 0x27, 0x80}
@@ -44,12 +44,12 @@
 #define DEVICE_6 {0x10, 0x06, 0x1c, 0xd6, 0x46, 0xd8}
 
 // Node Configuration
-uint8_t nodes[][6] = {DEVICE_5, DEVICE_1, DEVICE_6}; // List of nodes
+uint8_t nodes[][6] = {DEVICE_5, DEVICE_6, DEVICE_1}; // List of nodes
 //==============CHANGE THESE VALUE FOR EACH DEVICE ===========================
-const int currentNode = 0;                           // Current node index
-const int totalNodes = 1;                            // Total number of nodes
+const int currentNode = 1; // Current node index
+const int totalNodes = 2;  // Total number of nodes
 //============================================================================
-const int hubNode = 0;                               // Hub node index
+const int hubNode = 0; // Hub node index
 unsigned long lastMessageTime = 2;
 const unsigned long messageInterval = 5000; // Interval between messages in milliseconds
 #define MAX_IMAGE_SIZE 1000000              // Maximum image size
@@ -89,6 +89,7 @@ NimBLEServer *bleServer = NULL;
 NimBLECharacteristic *motionCharacteristic = NULL;
 NimBLECharacteristic *healthCheckCharacteristic = NULL;
 NimBLECharacteristic *pictureCharacteristic = NULL;
+NimBLECharacteristic *pictureReadyCharacteristic = NULL;
 bool deviceConnected = false;
 bool previousDeviceConnected = false;
 uint32_t notificationValue = 0;
@@ -99,6 +100,7 @@ int imageCounter = 0;
 #define MOTION_CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 #define HEALTH_CHECK_CHARACTERISTIC_UUID "50c07f71-e239-4f5c-825e-2cc13e914778"
 #define PICTURE_CHARACTERISTIC_UUID "0193b6d1-4e1b-745d-ac16-ba9af8fbb405"
+#define PICTURE_READY_CHARACTERISTIC_UUID "2f47b012-ba1d-4a90-b28b-49ca6bcf2a8b"
 
 uint8_t *imageRecvBuffer = nullptr;
 bool receivingImage = false;
@@ -110,6 +112,10 @@ void saveImageToSDCard(const uint8_t *buffer, uint32_t fileSize);
 void forwardImageToNextDevice();
 void processMessage(const Message &myData);
 void sendCapturedImage();
+void notifyBLEClient(int node);
+void notifyPictureReadyBLEClient(uint32_t fileSize);
+void captureAndSendImageTask(void *pvParameters);
+
 
 // Camera Configuration
 camera_config_t cameraConfig;
@@ -368,7 +374,15 @@ class MyCharacteristicCallbacks : public NimBLECharacteristicCallbacks
       {
         // we have reached our target
         blink(5);
-        sendCapturedImage();
+        //========
+        // sendCapturedImage();
+        if (targetNode == currentNode)
+        {
+          // Create a task to handle image capture and sending
+          xTaskCreatePinnedToCore(captureAndSendImageTask, "CaptureImageTask",
+                                  4096, NULL, 5, NULL, 0);
+        }
+        //==============
       }
       else
         blink(3);
@@ -415,7 +429,10 @@ void createBLEServer()
   pictureCharacteristic = service->createCharacteristic(
       PICTURE_CHARACTERISTIC_UUID,
       NIMBLE_PROPERTY::NOTIFY);
-  pictureCharacteristic->setValue("No data so far");
+
+  pictureReadyCharacteristic = service->createCharacteristic(
+      PICTURE_READY_CHARACTERISTIC_UUID,
+      NIMBLE_PROPERTY::NOTIFY);
 
   // Start the service
   service->start();
@@ -432,9 +449,12 @@ void createBLEServer()
 // Send a file via BLE in chunks
 void sendFileViaBLE(fs::FS &fs, String path)
 {
-  //----
+
   Serial.printf("Reading file: %s\n", path);
+
   File file = fs.open(path);
+  // File file = fs.open("/hello.txt");
+
   if (!file)
   {
     Serial.println("Failed to open file for reading");
@@ -448,60 +468,28 @@ void sendFileViaBLE(fs::FS &fs, String path)
   size_t totalFileSize = file.size(); // Get total file size for progress reporting
   Serial.printf("File Size : %d\n", totalFileSize);
 
+  // notifify server that the file is comming !!!
+  notifyPictureReadyBLEClient((uint32_t)totalFileSize);
+
   Serial.print("Read from file: ");
   while (file.available())
   {
-    //Serial.print(".");
+    // Serial.print(".");
     bytesRead = file.read(buffer, chunkSize);           // Read chunk from file
     pictureCharacteristic->setValue(buffer, bytesRead); // Set value to notify
     pictureCharacteristic->notify();                    // Send notification
+    // pictureReadyCharacteristic->setValue(buffer, bytesRead); // Set value to notify
+    // pictureReadyCharacteristic->notify();                    // Send notification
 
     totalBytesSent += bytesRead; // Track bytes sent for progress
     float progress = (float)totalBytesSent / totalFileSize * 100.0f;
     Serial.printf("Sending file: %.2f%%\n", progress); // Display progress (optional)
 
-    delay(50); // Optional delay to avoid flooding the BLE client
+    // delay(1000); // Optional delay to avoid flooding the BLE client
   }
   file.close(); // Close the file when done
   Serial.println("File sent via BLE successfully");
 }
-
-/*
-void sendFileViaBLE(fs::FS &fs, String path)
-{
-  //----
-  Serial.printf("Reading file: %s\n", path);
-  File file = fs.open(path);
-  if (!file)
-  {
-    Serial.println("Failed to open file for reading");
-    return;
-  }
-
-  const size_t chunkSize = 500; // Size of each chunk (can adjust depending on BLE MTU)
-  uint8_t buffer[chunkSize];
-  size_t bytesRead = 0;
-  size_t totalBytesSent = 0;
-  size_t totalFileSize = file.size(); // Get total file size for progress reporting
-  Serial.printf("File Size : %d\n", totalFileSize);
-
-  Serial.print("Read from file: ");
-  while (file.available())
-  {
-    Serial.print(".");
-    bytesRead = file.read(buffer, chunkSize);           // Read chunk from file
-    pictureCharacteristic->setValue(buffer, bytesRead); // Set value to notify
-    pictureCharacteristic->notify();                    // Send notification
-
-    totalBytesSent += bytesRead; // Track bytes sent for progress
-    float progress = (float)totalBytesSent / totalFileSize * 100.0f;
-    Serial.printf("Sending file: %.2f%%\n", progress); // Display progress (optional)
-
-    delay(50); // Optional delay to avoid flooding the BLE client
-  }
-  file.close(); // Close the file when done
-  Serial.println("File sent via BLE successfully");
-}*/
 
 // Notify the BLE client with the given value
 void notifyBLEClient(int node)
@@ -516,7 +504,7 @@ void notifyBLEClient(int node)
     // Send the originNode as a BLE notification
     motionCharacteristic->setValue(node); // Ensure motionCharacteristic is properly initialized
     motionCharacteristic->notify();       // Notify the connected BLE client
-    delay(1000);                          // Add delay to avoid flooding the BLE client with notifications
+    delay(500);                           // Add delay to avoid flooding the BLE client with notifications
   }
 
   // Handle case when the device is disconnected and advertising needs to start
@@ -537,7 +525,38 @@ void notifyBLEClient(int node)
   }
 
   // Consider removing or shortening this delay to make the loop more responsive
-  delay(5000); // Long delay, may want to reduce or remove for real-time responsiveness
+  // delay(5000); // Long delay, may want to reduce or remove for real-time responsiveness
+}
+
+void notifyPictureReadyBLEClient(uint32_t fileSize)
+{
+  Serial.println("Notifying BLE Client that the picture is ready for transfer...");
+
+  if (deviceConnected)
+  {
+    // Send the originNode as a BLE notification
+    pictureReadyCharacteristic->setValue(fileSize);
+    pictureReadyCharacteristic->notify();
+
+    delay(10);
+  }
+
+  // Handle case when the device is disconnected and advertising needs to start
+  if (!deviceConnected && previousDeviceConnected)
+  {
+    Serial.println("Start Advertising...");
+
+    delay(500);                    // Small delay before starting advertising (to avoid too rapid retries)
+    bleServer->startAdvertising(); // Start advertising to reconnect
+    Serial.println("Start advertising");
+    previousDeviceConnected = deviceConnected;
+  }
+
+  // If the device just connected, update the previousDeviceConnected flag
+  if (deviceConnected && !previousDeviceConnected)
+  {
+    previousDeviceConnected = deviceConnected;
+  }
 }
 
 // Function to send the next chunk
@@ -595,6 +614,53 @@ void sendNextChunk()
   }
 }
 
+void captureAndSendImageTask(void *pvParameters)
+{
+  fb = esp_camera_fb_get();
+  if (!fb)
+  {
+    Serial.println("Camera capture failed");
+    return;
+  }
+  if (fb->buf == nullptr || fb->len == 0)
+  {
+    Serial.println("No image data to send or invalid image size.");
+    esp_camera_fb_return(fb);
+    fb = nullptr;
+    return;
+  }
+
+  // Serial.printf("Image size: %d\n", fb->len);
+
+  if (currentNode == hubNode)
+  {
+    // Send via BLE to phone
+    Serial.printf("Image size: %d bytes\n", fb->len);
+    saveImageToSDCard(fb->buf, fb->len);
+  }
+  else
+  {
+    imageBuffer = fb->buf;
+    imageSize = fb->len;
+    totalChunks = imageSize / CHUNK_SIZE;
+    lastChunkSize = imageSize % CHUNK_SIZE;
+    currentChunkIndex = 0;
+    retryCount = 0;
+
+    sendingChunk = true;
+
+    Serial.printf("Image size: %d bytes\n", imageSize);
+    Serial.printf("Total chunks: %d\n", totalChunks);
+    Serial.printf("Last chunk size: %d bytes\n", lastChunkSize);
+
+    // Start sending the first chunk
+    sendNextChunk();
+  }
+  // sendingChunk = false;
+  esp_camera_fb_return(fb); // Free the frame buffer after sending all chunks
+  vTaskDelete(NULL);        // Delete the task after completion
+}
+
 void sendCapturedImage()
 {
   fb = esp_camera_fb_get();
@@ -639,7 +705,7 @@ void sendCapturedImage()
   }
   // sendingChunk = false;
   esp_camera_fb_return(fb); // Free the frame buffer after sending all chunks
-  //Serial.println("Image sent successfully2");
+  // Serial.println("Image sent successfully2");
 }
 
 // ESP-NOW send callback function
@@ -803,6 +869,7 @@ void forwardImageToNextDevice()
 
   sendNextChunk();
 }
+
 void processMessage(const Message &myData)
 {
   Serial.println("Processing Message...");
@@ -905,7 +972,7 @@ void setup()
       removeDirectory(SD_MMC, "/mydir");
       listDirectory(SD_MMC, "/", 2);
       writeFile(SD_MMC, "/hello.txt", "Hello ");
-      appendFile(SD_MMC, "/hello.txt", "World!\n");
+      appendFile(SD_MMC, "/hello.txt", "World! and the univers also! hope every living creates are happy and fully realise there development and exploring potial.  Lets all meet soon and share knowledge!!!\n");
       readFile(SD_MMC, "/hello.txt");
     }
   }
