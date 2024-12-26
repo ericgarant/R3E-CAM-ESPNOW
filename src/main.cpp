@@ -46,14 +46,14 @@
 // Node Configuration
 uint8_t nodes[][6] = {DEVICE_5, DEVICE_6, DEVICE_1}; // List of nodes
 //==============CHANGE THESE VALUE FOR EACH DEVICE ===========================
-const int currentNode = 1; // Current node index
-const int totalNodes = 2;  // Total number of nodes
+const int currentNode = 2; // Current node index
+const int totalNodes = 3;  // Total number of nodes
 //============================================================================
 const int hubNode = 0; // Hub node index
-unsigned long lastMessageTime = 2;
+unsigned long lastMessageTime = 0;
 const unsigned long messageInterval = 5000; // Interval between messages in milliseconds
 #define MAX_IMAGE_SIZE 1000000              // Maximum image size
-#define CHUNK_SIZE 150                      // Chunk size to fit within ESP-NOW payload limits (240 bytes)
+#define CHUNK_SIZE 200                      // Chunk size to fit within ESP-NOW payload limits (240 bytes)
 #define MAX_RETRIES 5
 
 // Data Structure for ESP-NOW messages
@@ -108,14 +108,14 @@ uint32_t totalBytesReceived = 0; // Track total bytes received
 
 void processImageChunk(const ImageChunk &chunk);
 void finalizeImageReception(const ImageChunk &chunk);
-void saveImageToSDCard(const uint8_t *buffer, uint32_t fileSize);
+// void saveImageToSDCard(const uint8_t *buffer, uint32_t fileSize);
 void forwardImageToNextDevice();
 void processMessage(const Message &myData);
-void sendCapturedImage();
+// void sendCapturedImage();
 void notifyBLEClient(int node);
 void notifyPictureReadyBLEClient(uint32_t fileSize);
 void captureAndSendImageTask(void *pvParameters);
-
+void sendImageToBLEServer(const uint8_t *buffer, uint32_t imgSize);
 
 // Camera Configuration
 camera_config_t cameraConfig;
@@ -152,7 +152,7 @@ void initializeCameraConfig()
   cameraConfig.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
   cameraConfig.fb_location = CAMERA_FB_IN_PSRAM;
   cameraConfig.jpeg_quality = 5;
-  cameraConfig.fb_count = 2;
+  cameraConfig.fb_count = 1; // used to be 2
 }
 void blink(int count)
 {
@@ -345,7 +345,6 @@ class MyServerCallbacks : public NimBLEServerCallbacks
 void sendDataToNextDevice(int8_t nextDeviceIndex, const Message &receivedData)
 {
   Serial.println("sendDataToNextDevice ");
-  // sendingChunk = false;
 
   if (currentNode + nextDeviceIndex < 0 || currentNode + nextDeviceIndex >= totalNodes)
     return;
@@ -385,16 +384,18 @@ class MyCharacteristicCallbacks : public NimBLECharacteristicCallbacks
         //==============
       }
       else
+      {
         blink(3);
 
-      // Prepare the message
-      Message myData;
-      myData.currentNode = currentNode;
-      myData.originNode = targetNode;
-      strcpy(myData.text, "HEALTH CHECK");
+        // Prepare the message
+        Message myData;
+        myData.currentNode = currentNode;
+        myData.originNode = targetNode;
+        strcpy(myData.text, "HEALTH CHECK");
 
-      // Send the data to the next device
-      sendDataToNextDevice(1, myData);
+        // Send the data to the next device
+        sendDataToNextDevice(1, myData);
+      }
     }
     else
     {
@@ -447,7 +448,7 @@ void createBLEServer()
 }
 
 // Send a file via BLE in chunks
-void sendFileViaBLE(fs::FS &fs, String path)
+/*void sendFileViaBLE(fs::FS &fs, String path)
 {
 
   Serial.printf("Reading file: %s\n", path);
@@ -471,7 +472,6 @@ void sendFileViaBLE(fs::FS &fs, String path)
   // notifify server that the file is comming !!!
   notifyPictureReadyBLEClient((uint32_t)totalFileSize);
 
-  Serial.print("Read from file: ");
   while (file.available())
   {
     // Serial.print(".");
@@ -489,7 +489,7 @@ void sendFileViaBLE(fs::FS &fs, String path)
   }
   file.close(); // Close the file when done
   Serial.println("File sent via BLE successfully");
-}
+}*/
 
 // Notify the BLE client with the given value
 void notifyBLEClient(int node)
@@ -595,7 +595,8 @@ void sendNextChunk()
     if (retryCount <= MAX_RETRIES)
     {
       Serial.printf("Retrying chunk %d (Attempt %d of %d)\n", currentChunkIndex, retryCount, MAX_RETRIES);
-      delay(200);      // Small delay before retrying
+      delay(200); // Small delay before retrying
+      sendingChunk = true;
       sendNextChunk(); // Retry sending the current chunk
     }
     else
@@ -612,11 +613,23 @@ void sendNextChunk()
   {
     retryCount = 0; // Reset retry count on successful send
   }
+
+  // Add delay every 25 chunks
+  if (currentChunkIndex % 5 == 0)
+  {
+    delay(225); // Delay of 500ms every 25 chunks
+  }
+  else
+    delay(75);
 }
 
 void captureAndSendImageTask(void *pvParameters)
 {
+  fb = esp_camera_fb_get(); // there is is bug where this buffer can be from previous capture so as a workarround it is discarded and captured again
+  esp_camera_fb_return(fb); // Free the frame buffer after sending all chunks
+  fb = NULL;
   fb = esp_camera_fb_get();
+
   if (!fb)
   {
     Serial.println("Camera capture failed");
@@ -636,7 +649,9 @@ void captureAndSendImageTask(void *pvParameters)
   {
     // Send via BLE to phone
     Serial.printf("Image size: %d bytes\n", fb->len);
-    saveImageToSDCard(fb->buf, fb->len);
+    // saveImageToSDCard(fb->buf, fb->len);
+    sendImageToBLEServer(fb->buf, fb->len);
+    esp_camera_fb_return(fb); // Free the frame buffer after sending all chunks
   }
   else
   {
@@ -647,65 +662,17 @@ void captureAndSendImageTask(void *pvParameters)
     currentChunkIndex = 0;
     retryCount = 0;
 
-    sendingChunk = true;
-
     Serial.printf("Image size: %d bytes\n", imageSize);
     Serial.printf("Total chunks: %d\n", totalChunks);
     Serial.printf("Last chunk size: %d bytes\n", lastChunkSize);
 
     // Start sending the first chunk
-    sendNextChunk();
-  }
-  // sendingChunk = false;
-  esp_camera_fb_return(fb); // Free the frame buffer after sending all chunks
-  vTaskDelete(NULL);        // Delete the task after completion
-}
-
-void sendCapturedImage()
-{
-  fb = esp_camera_fb_get();
-  if (!fb)
-  {
-    Serial.println("Camera capture failed");
-    return;
-  }
-  if (fb->buf == nullptr || fb->len == 0)
-  {
-    Serial.println("No image data to send or invalid image size.");
-    esp_camera_fb_return(fb);
-    fb = nullptr;
-    return;
-  }
-
-  // Serial.printf("Image size: %d\n", fb->len);
-
-  if (currentNode == hubNode)
-  {
-    // Send via BLE to phone
-    Serial.printf("Image size: %d bytes\n", fb->len);
-    saveImageToSDCard(fb->buf, fb->len);
-  }
-  else
-  {
-    imageBuffer = fb->buf;
-    imageSize = fb->len;
-    totalChunks = imageSize / CHUNK_SIZE;
-    lastChunkSize = imageSize % CHUNK_SIZE;
-    currentChunkIndex = 0;
-    retryCount = 0;
-
     sendingChunk = true;
-
-    Serial.printf("Image size: %d bytes\n", imageSize);
-    Serial.printf("Total chunks: %d\n", totalChunks);
-    Serial.printf("Last chunk size: %d bytes\n", lastChunkSize);
-
-    // Start sending the first chunk
     sendNextChunk();
   }
   // sendingChunk = false;
-  esp_camera_fb_return(fb); // Free the frame buffer after sending all chunks
-  // Serial.println("Image sent successfully2");
+
+  vTaskDelete(NULL); // Delete the task after completion
 }
 
 // ESP-NOW send callback function
@@ -719,6 +686,7 @@ void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
   {
     // Move to the next chunk and send it
     currentChunkIndex++;
+    sendingChunk = true;
     sendNextChunk();
   }
   else
@@ -729,6 +697,7 @@ void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
     {
       Serial.printf("Retrying chunk %d (Attempt %d of %d)\n", currentChunkIndex, retryCount, MAX_RETRIES);
       delay(200); // Small delay before retrying
+      sendingChunk = true;
       sendNextChunk();
     }
     else
@@ -777,6 +746,12 @@ void processImageChunk(const ImageChunk &chunk)
   {
     receivingImage = true;
     imageRecvBuffer = (uint8_t *)malloc(MAX_IMAGE_SIZE);
+    /*uint8_t *imageBuffer = (uint8_t *)heap_caps_malloc(MAX_IMAGE_SIZE, MALLOC_CAP_DMA);
+    if (imageBuffer == NULL)
+    {
+      Serial.println("Failed to allocate memory for imageBuffer");
+      // Handle the error gracefully
+    }*/
     totalBytesReceived = 0;
   }
 
@@ -800,7 +775,8 @@ void finalizeImageReception(const ImageChunk &chunk)
     // Send image via BLE to phone
     Serial.println("Forwarding image to BLE");
     Serial.printf("Bytes received: %d; expected: %d\n", totalBytesReceived, chunk.fileSize);
-    saveImageToSDCard(imageRecvBuffer, chunk.fileSize);
+    // saveImageToSDCard(imageRecvBuffer, chunk.fileSize);
+    sendImageToBLEServer(imageRecvBuffer, chunk.fileSize);
   }
   else
   {
@@ -817,8 +793,39 @@ void finalizeImageReception(const ImageChunk &chunk)
   }
 }
 
+void sendImageToBLEServer(const uint8_t *buffer, uint32_t imgSize)
+{
+  const size_t chunkSize = 200; // Size of each chunk (can adjust depending on BLE MTU)
+  size_t bytesRead = 0;
+  size_t totalBytesSent = 0;
+  size_t chkCnt = imgSize / chunkSize;
+  size_t lstChkSize = imgSize % chunkSize;
+  Serial.printf("Image Size : %d\n", imgSize);
+  // Notify server that the file is coming
+  notifyPictureReadyBLEClient(imgSize);
+  for (size_t i = 0; i < chkCnt; i++)
+  {
+    // Copy chunk from the buffer
+    pictureCharacteristic->setValue(buffer + totalBytesSent, chunkSize); // Set value to notify
+    pictureCharacteristic->notify();                                     // Send notification
+    totalBytesSent += chunkSize;                                         // Track bytes sent for progress
+    float progress = (float)totalBytesSent / imgSize * 100.0f;
+    Serial.printf("Sending file: %.2f%%\n", progress); // Display progress (optional)
+    delay(20);                                         // Optional delay to avoid flooding the BLE client
+  } // Send the last chunk if it exists
+  if (lstChkSize > 0)
+  {
+    pictureCharacteristic->setValue(buffer + totalBytesSent, lstChkSize); // Set value to notify
+    pictureCharacteristic->notify();                                      // Send notification
+    totalBytesSent += lstChkSize;                                         // Track bytes sent for progress
+    float progress = (float)totalBytesSent / imgSize * 100.0f;
+    Serial.printf("Sending file: %.2f%%\n", progress); // Display progress (optional)
+  }
+  Serial.println("Image transfer complete.");
+}
+
 // Save the received image to the SD card
-void saveImageToSDCard(const uint8_t *buffer, uint32_t fileSize)
+/*void saveImageToSDCard(const uint8_t *buffer, uint32_t fileSize)
 {
   if (buffer == nullptr || fileSize == 0)
   {
@@ -846,9 +853,9 @@ void saveImageToSDCard(const uint8_t *buffer, uint32_t fileSize)
     Serial.println("Image saved to SD card successfully.");
   }
   file.close();
-  delay(1000);
+  delay(2000);
   sendFileViaBLE(SD_MMC, path);
-}
+}*/
 
 // Forward the received image to the next device
 void forwardImageToNextDevice()
@@ -861,12 +868,12 @@ void forwardImageToNextDevice()
   lastChunkSize = imageSize % CHUNK_SIZE;
   currentChunkIndex = 0;
   retryCount = 0;
-  sendingChunk = true;
 
   Serial.printf("Bytes received: %d\n", imageSize);
   Serial.printf("Fwd total chunks: %d\n", totalChunks);
   Serial.printf("Fwd last chunk size: %d bytes\n", lastChunkSize);
 
+  sendingChunk = true;
   sendNextChunk();
 }
 
@@ -892,7 +899,10 @@ void processMessage(const Message &myData)
     if (myData.originNode == currentNode)
     {
       blink(5);
-      sendCapturedImage();
+      // sendCapturedImage();
+      //  Create a task to handle image capture and sending
+      xTaskCreatePinnedToCore(captureAndSendImageTask, "CaptureImageTask",
+                              4096, NULL, 5, NULL, 0);
     }
     else
     {
@@ -929,8 +939,11 @@ void setup()
     Serial.printf("Camera init failed with error 0x%x", err);
     return;
   }
+  // fb = esp_camera_fb_get(); // there is is bug where this buffer can be from previous capture so as a workarround it is discarded and captured again
+  esp_camera_fb_return(fb); // Free the frame buffer after sending all chunks
+  fb = NULL;
 
-  if (true)
+  if (false)
   {
 
     if (currentNode == hubNode)
@@ -1011,8 +1024,8 @@ void setup()
 
 void loop()
 {
-  // if (digitalRead(PIR_SENSOR_PIN) == HIGH && !sendingChunk)
-  if (digitalRead(PIR_SENSOR_PIN) == HIGH)
+  if (digitalRead(PIR_SENSOR_PIN) == HIGH && !sendingChunk)
+  // if (digitalRead(PIR_SENSOR_PIN) == HIGH)
 
   {
     unsigned long currentTime = millis();
@@ -1033,9 +1046,9 @@ void loop()
         myData.originNode = currentNode;
         sendDataToNextDevice(-1, myData);
       };
-
+      delay(5000);
       Serial.println("Sensor motion detected...end of loop");
     }
   }
-  delay(2000);
+  delay(1000);
 }
