@@ -35,7 +35,7 @@
 #define SD_MMC_D0 2
 
 // MAC Addresses for ESP-NOW communication (Replace with your actual MAC addresses)
-#define DEVICE_0 {0x88, 0x13, 0xbf, 0x69, 0xca, 0x68}
+#define DEVICE_0 {0x88, 0x13, 0xbf, 0x69, 0xca, 0x68} // no cam
 #define DEVICE_1 {0x0c, 0xb8, 0x15, 0x07, 0x43, 0x7c}
 #define DEVICE_2 {0x1c, 0x69, 0x20, 0xe6, 0x27, 0x80}
 #define DEVICE_3 {0xac, 0x15, 0x18, 0xed, 0x44, 0xcc}
@@ -44,10 +44,11 @@
 #define DEVICE_6 {0x10, 0x06, 0x1c, 0xd6, 0x46, 0xd8}
 
 // Node Configuration
-uint8_t nodes[][6] = {DEVICE_5, DEVICE_6, DEVICE_1}; // List of nodes
+uint8_t nodes[][6] = {DEVICE_5, DEVICE_6, DEVICE_1, DEVICE_0}; // List of nodes
 //==============CHANGE THESE VALUE FOR EACH DEVICE ===========================
-const int currentNode = 2; // Current node index
-const int totalNodes = 3;  // Total number of nodes
+const int currentNode = 0; // Current node index
+const int totalNodes = 2;  // Total number of nodes
+const bool hasCam = true;
 //============================================================================
 const int hubNode = 0; // Hub node index
 unsigned long lastMessageTime = 0;
@@ -161,11 +162,11 @@ void blink(int count)
     // turn the LED on (HIGH is the voltage level)
     digitalWrite(LED_PIN, HIGH);
     // wait for a second
-    delay(300);
+    delay(200);
     // turn the LED off by making the voltage LOW
     digitalWrite(LED_PIN, LOW);
     // wait for a second
-    delay(300);
+    delay(200);
   }
 }
 
@@ -369,23 +370,23 @@ class MyCharacteristicCallbacks : public NimBLECharacteristicCallbacks
       int targetNode = (int)value[0];
       Serial.println(targetNode);
 
-      if (targetNode == currentNode)
+      if (targetNode == currentNode && hasCam)
       {
         // we have reached our target
-        blink(5);
+        blink(3);
         //========
         // sendCapturedImage();
-        if (targetNode == currentNode)
-        {
-          // Create a task to handle image capture and sending
-          xTaskCreatePinnedToCore(captureAndSendImageTask, "CaptureImageTask",
-                                  4096, NULL, 5, NULL, 0);
-        }
+        // if (targetNode == currentNode)
+        //{
+        // Create a task to handle image capture and sending
+        xTaskCreatePinnedToCore(captureAndSendImageTask, "CaptureImageTask",
+                                4096, NULL, 5, NULL, 0);
+        //}
         //==============
       }
       else
       {
-        blink(3);
+        blink(2);
 
         // Prepare the message
         Message myData;
@@ -727,7 +728,27 @@ void onDataReceived(const uint8_t *mac, const uint8_t *incomingData, int len)
       Serial.println("Chunk data corrupted. Requesting resend...");
       return;
     }
-    processImageChunk(chunk);
+    // processImageChunk(chunk);
+    if (currentNode != hubNode) // forward the chun directly if not on hub
+    {
+      sendingChunk = false;
+      for (int i = 0; i <= MAX_RETRIES; i++)
+      {
+        esp_err_t result = esp_now_send(nodes[currentNode - 1], (uint8_t *)&chunk, len);
+        if (result != ESP_OK)
+        {
+          Serial.print("Error forwarding chunk: ");
+          Serial.println(esp_err_to_name(result));
+          Serial.printf("Retrying chunk  (Attempt %d of %d)\n", i, MAX_RETRIES);
+          delay(200); // Small delay before retrying
+        }
+        else
+          return;
+      }
+    }
+    else
+      processImageChunk(chunk);
+
     return;
   }
 
@@ -896,9 +917,9 @@ void processMessage(const Message &myData)
   {
     Serial.println("Handling HC");
 
-    if (myData.originNode == currentNode)
+    if (myData.originNode == currentNode && hasCam)
     {
-      blink(5);
+      blink(3);
       // sendCapturedImage();
       //  Create a task to handle image capture and sending
       xTaskCreatePinnedToCore(captureAndSendImageTask, "CaptureImageTask",
@@ -906,7 +927,7 @@ void processMessage(const Message &myData)
     }
     else
     {
-      blink(3);
+      blink(2);
       sendDataToNextDevice(1, myData);
     }
   }
@@ -932,18 +953,21 @@ void setup()
   pinMode(PIR_SENSOR_PIN, INPUT);
   pinMode(LED_PIN, OUTPUT);
 
-  initializeCameraConfig();
-  esp_err_t err = esp_camera_init(&cameraConfig);
-  if (err != ESP_OK)
+  if (hasCam)
   {
-    Serial.printf("Camera init failed with error 0x%x", err);
-    return;
+    initializeCameraConfig();
+    esp_err_t err = esp_camera_init(&cameraConfig);
+    if (err != ESP_OK)
+    {
+      Serial.printf("Camera init failed with error 0x%x", err);
+      return;
+    }
+    // fb = esp_camera_fb_get(); // there is is bug where this buffer can be from previous capture so as a workarround it is discarded and captured again
+    esp_camera_fb_return(fb); // Free the frame buffer after sending all chunks
+    fb = NULL;
   }
-  // fb = esp_camera_fb_get(); // there is is bug where this buffer can be from previous capture so as a workarround it is discarded and captured again
-  esp_camera_fb_return(fb); // Free the frame buffer after sending all chunks
-  fb = NULL;
 
-  if (false)
+  if (false) // keep for futur use (SD Card)
   {
 
     if (currentNode == hubNode)
