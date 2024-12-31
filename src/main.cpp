@@ -6,6 +6,7 @@
 #include <sd_read_write.h>
 #include <SD_MMC.h>
 #include <esp_crc.h>
+#include <esp_wifi.h>
 
 // Pin Definitions
 #define PIR_SENSOR_PIN 33 // PIR sensor pin
@@ -35,21 +36,112 @@
 #define SD_MMC_D0 2
 
 // MAC Addresses for ESP-NOW communication (Replace with your actual MAC addresses)
-#define DEVICE_0 {0x88, 0x13, 0xbf, 0x69, 0xca, 0x68} // no cam
-#define DEVICE_1 {0x0c, 0xb8, 0x15, 0x07, 0x43, 0x7c}
-#define DEVICE_2 {0x1c, 0x69, 0x20, 0xe6, 0x27, 0x80}
-#define DEVICE_3 {0xac, 0x15, 0x18, 0xed, 0x44, 0xcc}
-#define DEVICE_4 {0x88, 0x13, 0xbf, 0x69, 0x9e, 0xfc}
-#define DEVICE_5 {0xcc, 0x7b, 0x5c, 0x97, 0xf0, 0xc8}
-#define DEVICE_6 {0x10, 0x06, 0x1c, 0xd6, 0x46, 0xd8}
+// #define DEVICE_0 {0x88, 0x13, 0xbf, 0x69, 0xca, 0x68} // no cam
+// #define DEVICE_1 {0x0c, 0xb8, 0x15, 0x07, 0x43, 0x7c}
+// #define DEVICE_2 {0x1c, 0x69, 0x20, 0xe6, 0x27, 0x80}
+// #define DEVICE_3 {0xac, 0x15, 0x18, 0xed, 0x44, 0xcc}
+// #define DEVICE_4 {0x88, 0x13, 0xbf, 0x69, 0x9e, 0xfc}
+// #define DEVICE_5 {0xcc, 0x7b, 0x5c, 0x97, 0xf0, 0xc8}
+// #define DEVICE_6 {0x10, 0x06, 0x1c, 0xd6, 0x46, 0xd8}
 
 // Node Configuration
-uint8_t nodes[][6] = {DEVICE_5, DEVICE_6, DEVICE_1, DEVICE_0}; // List of nodes
+// uint8_t nodes[][6] = {DEVICE_5, DEVICE_6, DEVICE_1, DEVICE_0}; // List of nodes
 //==============CHANGE THESE VALUE FOR EACH DEVICE ===========================
-const int currentNode = 0; // Current node index
-const int totalNodes = 2;  // Total number of nodes
-const bool hasCam = true;
+// const int currentNode = 0; // Current node index
+// const int totalNodes = 2; // Total number of nodes
+// const bool hasCam = true;
 //============================================================================
+//----
+struct Node
+{
+  int nodeID;
+  bool isHub;
+  bool hasCam;
+  uint8_t currentMAC[6];
+  uint8_t previousMAC[6];
+  uint8_t nextMACsCount;
+  uint8_t nextMACs[2][6];
+};
+struct R3ENetwork
+{
+  uint8_t nodeCount;
+  Node nodeList[3];
+};
+
+Node node0 = {
+    .nodeID = 0,
+    .isHub = true,
+    .hasCam = true,
+    .currentMAC = {0xac, 0x15, 0x18, 0xf4, 0x40, 0xd8}, // Device 0
+    .previousMAC = {0, 0, 0, 0, 0, 0},                  // Use empty array instead of NULL
+    .nextMACsCount = 2,
+    .nextMACs = {
+        {0x0c, 0xb8, 0x15, 0x07, 0x43, 0x7c}, // Device 1
+        {0xac, 0x15, 0x18, 0xf4, 0x77, 0xe4}, // Device 6
+    }};
+
+Node node1 = {
+    .nodeID = 1,
+    .isHub = false,
+    .hasCam = true,
+    .currentMAC = {0x0c, 0xb8, 0x15, 0x07, 0x43, 0x7c},  // Device 1
+    .previousMAC = {0xac, 0x15, 0x18, 0xf4, 0x40, 0xd8}, // Device 0
+    .nextMACsCount = 0,
+    .nextMACs = {{0}} // Use empty array instead of NULL
+};
+
+Node node2 = {
+    .nodeID = 2,
+    .isHub = false,
+    .hasCam = true,
+    .currentMAC = {0xac, 0x15, 0x18, 0xf4, 0x77, 0xe4},  // Device 6
+    .previousMAC = {0xac, 0x15, 0x18, 0xf4, 0x40, 0xd8}, // Device 0
+    .nextMACsCount = 0,
+    .nextMACs = {{0}} // Use empty array instead of NULL
+};
+
+R3ENetwork _myNetwork = {
+    .nodeCount = 3,
+    .nodeList = {node0, node1, node2},
+};
+
+Node _curNode;
+
+Node FindNode(R3ENetwork network)
+{
+  uint8_t baseMac[6];
+  esp_err_t ret = esp_wifi_get_mac(WIFI_IF_STA, baseMac);
+  Node _node = {
+      .nodeID = -1,
+      .isHub = false,
+      .hasCam = true,
+      .currentMAC = {0},
+      .previousMAC = {0},
+      .nextMACsCount = 0,
+      .nextMACs = {{0}}};
+  if (ret == ESP_OK)
+  {
+    for (int i = 0; i <= network.nodeCount; i++)
+    {
+      if (baseMac[0] == network.nodeList[i].currentMAC[0] &&
+          baseMac[1] == network.nodeList[i].currentMAC[1] &&
+          baseMac[2] == network.nodeList[i].currentMAC[2] &&
+          baseMac[3] == network.nodeList[i].currentMAC[3] &&
+          baseMac[4] == network.nodeList[i].currentMAC[4] &&
+          baseMac[5] == network.nodeList[i].currentMAC[5])
+      {
+        return network.nodeList[i];
+      }
+    }
+    return _node;
+  }
+  else
+  {
+    Serial.println("Failed to read MAC address");
+    return _node;
+  }
+}
+//----
 const int hubNode = 0; // Hub node index
 unsigned long lastMessageTime = 0;
 const unsigned long messageInterval = 5000; // Interval between messages in milliseconds
@@ -342,20 +434,36 @@ class MyServerCallbacks : public NimBLEServerCallbacks
     deviceConnected = false;
   }
 };
-
-void sendDataToNextDevice(int8_t nextDeviceIndex, const Message &receivedData)
+void sendDataToPreviousDevice(const Message &receivedData)
 {
-  Serial.println("sendDataToNextDevice ");
+  Serial.println("sendDataToPreviousDevice ");
 
-  if (currentNode + nextDeviceIndex < 0 || currentNode + nextDeviceIndex >= totalNodes)
+  if (_curNode.previousMAC[0] == 0) // no previous node
     return;
 
-  if (esp_now_send(nodes[currentNode + nextDeviceIndex], (uint8_t *)&receivedData, sizeof(receivedData)) != ESP_OK)
+  if (esp_now_send(_curNode.previousMAC, (uint8_t *)&receivedData, sizeof(receivedData)) != ESP_OK)
   {
     Serial.println("Error sending the to next device");
   }
   else
     Serial.println("Sent to next device with no errors");
+}
+
+void sendDataToNextDevice(const Message &receivedData)
+{
+  Serial.println("sendDataToNextDevice ");
+
+  //if (_curNode.nextMACs[0][0] == 0) // no next device
+  //  return;
+  for (int i = 0; i < _curNode.nextMACsCount; i++)
+  {
+    if (esp_now_send(_curNode.nextMACs[i], (uint8_t *)&receivedData, sizeof(receivedData)) != ESP_OK)
+    {
+      Serial.println("Error sending the to next device");
+    }
+    else
+      Serial.println("Sent to next device with no errors");
+  }
 }
 
 class MyCharacteristicCallbacks : public NimBLECharacteristicCallbacks
@@ -370,7 +478,7 @@ class MyCharacteristicCallbacks : public NimBLECharacteristicCallbacks
       int targetNode = (int)value[0];
       Serial.println(targetNode);
 
-      if (targetNode == currentNode && hasCam)
+      if (targetNode == _curNode.nodeID && _curNode.hasCam)
       {
         // we have reached our target
         blink(3);
@@ -390,12 +498,12 @@ class MyCharacteristicCallbacks : public NimBLECharacteristicCallbacks
 
         // Prepare the message
         Message myData;
-        myData.currentNode = currentNode;
+        myData.currentNode = _curNode.nodeID;
         myData.originNode = targetNode;
         strcpy(myData.text, "HEALTH CHECK");
 
         // Send the data to the next device
-        sendDataToNextDevice(1, myData);
+        sendDataToNextDevice(myData);
       }
     }
     else
@@ -586,7 +694,7 @@ void sendNextChunk()
 
   Serial.printf("Sending chunk %d, size: %d\n", currentChunkIndex, chunk.chunkSize);
 
-  esp_err_t result = esp_now_send(nodes[currentNode - 1], (uint8_t *)&chunk, sizeof(ImageChunk));
+  esp_err_t result = esp_now_send(_curNode.previousMAC, (uint8_t *)&chunk, sizeof(ImageChunk));
 
   if (result != ESP_OK)
   {
@@ -646,7 +754,7 @@ void captureAndSendImageTask(void *pvParameters)
 
   // Serial.printf("Image size: %d\n", fb->len);
 
-  if (currentNode == hubNode)
+  if (_curNode.isHub)
   {
     // Send via BLE to phone
     Serial.printf("Image size: %d bytes\n", fb->len);
@@ -729,12 +837,12 @@ void onDataReceived(const uint8_t *mac, const uint8_t *incomingData, int len)
       return;
     }
     // processImageChunk(chunk);
-    if (currentNode != hubNode) // forward the chun directly if not on hub
+    if (!_curNode.isHub) // forward the chun directly if not on hub
     {
       sendingChunk = false;
       for (int i = 0; i <= MAX_RETRIES; i++)
       {
-        esp_err_t result = esp_now_send(nodes[currentNode - 1], (uint8_t *)&chunk, len);
+        esp_err_t result = esp_now_send(_curNode.previousMAC, (uint8_t *)&chunk, len);
         if (result != ESP_OK)
         {
           Serial.print("Error forwarding chunk: ");
@@ -791,7 +899,7 @@ void finalizeImageReception(const ImageChunk &chunk)
   Serial.printf("File received complete: %d\n", totalBytesReceived);
   receivingImage = false;
 
-  if (currentNode == hubNode)
+  if (_curNode.isHub)
   {
     // Send image via BLE to phone
     Serial.println("Forwarding image to BLE");
@@ -904,20 +1012,20 @@ void processMessage(const Message &myData)
 
   if (strcmp(myData.text, "MOTION DETECTED") == 0)
   {
-    if (currentNode == hubNode)
+    if (_curNode.isHub)
     {
       notifyBLEClient(myData.originNode);
     }
     else
     {
-      sendDataToNextDevice(-1, myData);
+      sendDataToPreviousDevice(myData);
     }
   }
   else if (strcmp(myData.text, "HEALTH CHECK") == 0)
   {
     Serial.println("Handling HC");
 
-    if (myData.originNode == currentNode && hasCam)
+    if (myData.originNode == _curNode.nodeID && _curNode.hasCam)
     {
       blink(3);
       // sendCapturedImage();
@@ -928,7 +1036,7 @@ void processMessage(const Message &myData)
     else
     {
       blink(2);
-      sendDataToNextDevice(1, myData);
+      sendDataToNextDevice(myData);
     }
   }
 }
@@ -952,8 +1060,42 @@ void setup()
   Serial.begin(9600);
   pinMode(PIR_SENSOR_PIN, INPUT);
   pinMode(LED_PIN, OUTPUT);
+  //=== init ESP NOW ===
+  // Set device as a Wi-Fi Station
+  WiFi.mode(WIFI_STA);
 
-  if (hasCam)
+  // Init ESP-NOW
+  if (esp_now_init() != ESP_OK)
+  {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+
+  //---
+  _curNode = FindNode(_myNetwork);
+  if (_curNode.nodeID < 0)
+    return;
+  else
+    Serial.printf("%02x:%02x:%02x:%02x:%02x:%02x\n",
+                  _curNode.currentMAC[0], _curNode.currentMAC[1], _curNode.currentMAC[2],
+                  _curNode.currentMAC[3], _curNode.currentMAC[4], _curNode.currentMAC[5]);
+  Serial.println(_curNode.isHub);
+  //---
+
+  // Register send and receive callbacks
+  esp_now_register_send_cb(onDataSent);
+  esp_now_register_recv_cb(onDataReceived);
+
+  // Add peers
+  if (!_curNode.isHub)
+    addPeer(_curNode.previousMAC); // Add previous node as peer
+  for (int i = 0; i < _curNode.nextMACsCount; i++)
+  {
+    addPeer(_curNode.nextMACs[i]); // Add next node as peer
+  }
+  //====================
+
+  if (_curNode.hasCam)
   {
     initializeCameraConfig();
     esp_err_t err = esp_camera_init(&cameraConfig);
@@ -970,7 +1112,7 @@ void setup()
   if (false) // keep for futur use (SD Card)
   {
 
-    if (currentNode == hubNode)
+    if (_curNode.isHub)
     {
       SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
       if (!SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_DEFAULT, 5))
@@ -1015,35 +1157,8 @@ void setup()
   }
 
   // Node 0 needs to notify the client app through BLE
-  if (currentNode == hubNode)
+  if (_curNode.isHub)
     createBLEServer();
-
-  Serial.print("Number of nodes: ");
-  Serial.println(totalNodes);
-
-  // Set device as a Wi-Fi Station
-  WiFi.mode(WIFI_STA);
-
-  // Init ESP-NOW
-  if (esp_now_init() != ESP_OK)
-  {
-    Serial.println("Error initializing ESP-NOW");
-    return;
-  }
-
-  // Register send and receive callbacks
-  esp_now_register_send_cb(onDataSent);
-  esp_now_register_recv_cb(onDataReceived);
-
-  // Add peers
-  if (currentNode > hubNode)
-  {
-    addPeer(nodes[currentNode - 1]); // Add previous node as peer
-  }
-  if (currentNode < totalNodes - 1)
-  {
-    addPeer(nodes[currentNode + 1]); // Add next node as peer
-  }
 }
 
 void loop()
@@ -1058,17 +1173,17 @@ void loop()
       lastMessageTime = currentTime;
       Serial.println("Sensor motion detected...begin loop");
       blink(1);
-      if (currentNode == hubNode)
+      if (_curNode.isHub)
       {
-        notifyBLEClient(currentNode);
+        notifyBLEClient(_curNode.nodeID);
       }
       else
       {
         Message myData;
         strcpy(myData.text, "MOTION DETECTED");
-        myData.currentNode = currentNode;
-        myData.originNode = currentNode;
-        sendDataToNextDevice(-1, myData);
+        myData.currentNode = _curNode.nodeID;
+        myData.originNode = _curNode.nodeID;
+        sendDataToPreviousDevice(myData);
       };
       delay(5000);
       Serial.println("Sensor motion detected...end of loop");
