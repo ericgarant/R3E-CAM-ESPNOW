@@ -68,7 +68,7 @@ struct R3ENetwork
   std::vector<Node> nodeList; // Dynamic allocation
 };
 
-Node node0 = {
+/*Node node0 = {
     .nodeID = 0,
     .isHub = true,
     .hasCam = true,
@@ -100,15 +100,11 @@ Node node2 = {
     .nextMACs = {{0}} // Use empty array instead of NULL
 };
 
-/*R3ENetwork _myNetwork = {
-    .nodeCount = 3,
-    .nodeList = {node0, node1, node2},
-};*/
-
 R3ENetwork _myNetwork = {
     3,                    // nodeCount
     {node0, node1, node2} // nodeList (vector automatically adapts size)
-};
+};*/
+R3ENetwork _myNetwork;
 
 Node _curNode;
 
@@ -152,7 +148,10 @@ unsigned long lastMessageTime = 0;
 const unsigned long messageInterval = 5000; // Interval between messages in milliseconds
 #define MAX_IMAGE_SIZE 1000000              // Maximum image size
 #define CHUNK_SIZE 200                      // Chunk size to fit within ESP-NOW payload limits (240 bytes)
+#define NETWORK_CHUNK_SIZE 200              // Chunk size to fit within ESP-NOW payload limits (240 bytes)
+
 #define MAX_RETRIES 5
+bool isESPNOWReady = false;
 
 // Data Structure for ESP-NOW messages
 struct Message
@@ -170,6 +169,18 @@ struct ImageChunk
   uint32_t fileSize;
   uint32_t checksum; // Checksum field
 };
+
+struct NetworkChunk
+{
+  uint8_t chunkID;
+  uint8_t totalChunks;
+  uint8_t chunkData[NETWORK_CHUNK_SIZE];
+};
+
+std::vector<uint8_t> networkDataBuffer;
+uint8_t expectedChunks = 0;
+uint8_t receivedChunks = 0;
+
 // Global variables to manage image sending state
 uint8_t *imageBuffer = nullptr; // Pointer to the image buffer
 uint32_t imageSize = 0;         // Total image size
@@ -218,6 +229,7 @@ void notifyBLEClient(int node);
 void notifyPictureReadyBLEClient(uint32_t fileSize);
 void captureAndSendImageTask(void *pvParameters);
 void sendImageToBLEServer(const uint8_t *buffer, uint32_t imgSize);
+void initESPNOW();
 
 // Camera Configuration
 camera_config_t cameraConfig;
@@ -256,6 +268,104 @@ void initializeCameraConfig()
   cameraConfig.jpeg_quality = 5;
   cameraConfig.fb_count = 1; // used to be 2
 }
+//=====
+
+std::vector<uint8_t> serializeNetwork(const R3ENetwork &network)
+{
+  std::vector<uint8_t> buffer;
+  buffer.push_back(network.nodeCount); // Serialize node count
+
+  for (const Node &node : network.nodeList)
+  {
+    // Serialize nodeID
+    buffer.push_back(node.nodeID);
+
+    // Serialize isHub and hasCam
+    buffer.push_back(node.isHub);
+    buffer.push_back(node.hasCam);
+
+    // Serialize currentMAC and previousMAC
+    buffer.insert(buffer.end(), node.currentMAC, node.currentMAC + sizeof(node.currentMAC));
+    buffer.insert(buffer.end(), node.previousMAC, node.previousMAC + sizeof(node.previousMAC));
+
+    // Serialize nextMACsCount (always 2)
+    buffer.push_back(node.nextMACsCount); // Fixed to 2 for consistency
+
+    // Serialize exactly 2 nextMACs
+    for (uint8_t i = 0; i < 2; i++)
+    {
+      buffer.insert(buffer.end(), node.nextMACs[i], node.nextMACs[i] + sizeof(node.nextMACs[i]));
+    }
+  }
+
+  return buffer;
+}
+
+R3ENetwork deserializeNetwork(uint8_t *data)
+{
+  R3ENetwork network;
+  size_t offset = 0;
+  network.nodeCount = data[offset++];
+  Serial.printf("Resize node count %d nodes\n", network.nodeCount);
+
+  network.nodeList.resize(network.nodeCount); // Resize dynamically
+  for (uint8_t i = 0; i < network.nodeCount; i++)
+  {
+    Node &node = network.nodeList[i];
+    node.nodeID = data[offset++];
+    node.isHub = data[offset++];
+    node.hasCam = data[offset++];
+    memcpy(node.currentMAC, &data[offset], 6);
+    offset += 6;
+    memcpy(node.previousMAC, &data[offset], 6);
+    offset += 6;
+    node.nextMACsCount = data[offset++];
+    // for (uint8_t j = 0; j < node.nextMACsCount; j++)
+    for (uint8_t j = 0; j < 2; j++)
+
+    { // Use nextMACsCount
+      memcpy(node.nextMACs[j], &data[offset], 6);
+      offset += 6;
+    }
+  }
+  return network;
+}
+void sendNetwork(const R3ENetwork &network)
+{
+  Serial.println("sendNetwork");
+
+  std::vector<uint8_t> serializedData = serializeNetwork(network);
+  size_t totalSize = serializedData.size();
+  // const size_t CHUNK_SIZE_ADJUSTED = NETWORK_CHUNK_SIZE - 2; // Adjusted for chunkID and totalChunks fields
+  const size_t CHUNK_SIZE_ADJUSTED = NETWORK_CHUNK_SIZE; // Adjusted for chunkID and totalChunks fields
+
+  uint8_t totalChunks = (totalSize + CHUNK_SIZE_ADJUSTED - 1) / CHUNK_SIZE_ADJUSTED;
+
+  Serial.printf("Sending Network Total Chunk: %d of:%d, chunk adj size:%d\n", totalChunks, totalSize, CHUNK_SIZE_ADJUSTED);
+
+  for (uint8_t i = 0; i < totalChunks; i++)
+  {
+
+    NetworkChunk chunk;
+    chunk.chunkID = i;
+    chunk.totalChunks = totalChunks;
+    size_t offset = i * CHUNK_SIZE_ADJUSTED;
+    size_t chunkSize = std::min(CHUNK_SIZE_ADJUSTED, totalSize - offset);
+    memcpy(chunk.chunkData, serializedData.data() + offset, chunkSize);
+
+    // Call ESP-NOW send function
+    // esp_now_send(nullptr, reinterpret_cast<uint8_t*>(&chunk), sizeof(NetworkChunk));
+    // delay(100); // Small delay to ensure smooth transmission
+    for (int j = 0; j < _curNode.nextMACsCount; j++)
+    {
+      Serial.printf("Sending Network Chunk: %d of %d\n", i, totalChunks);
+      esp_now_send(_curNode.nextMACs[j], reinterpret_cast<uint8_t *>(&chunk), sizeof(NetworkChunk));
+      delay(100); // Small delay to ensure smooth transmission
+    }
+  }
+}
+
+//=====
 void blink(int count)
 {
   for (int i = 0; i < count; i++)
@@ -522,36 +632,6 @@ class MyCharacteristicCallbacks : public NimBLECharacteristicCallbacks
   }
 };
 
-R3ENetwork deserializeNetwork(uint8_t *data)
-{
-  R3ENetwork network;
-  size_t offset = 0;
-  network.nodeCount = data[offset++];
-  Serial.printf("Resize node count %d nodes\n", network.nodeCount);
-
-  network.nodeList.resize(network.nodeCount); // Resize dynamically
-  for (uint8_t i = 0; i < network.nodeCount; i++)
-  {
-    Node &node = network.nodeList[i];
-    node.nodeID = data[offset++];
-    node.isHub = data[offset++];
-    node.hasCam = data[offset++];
-    memcpy(node.currentMAC, &data[offset], 6);
-    offset += 6;
-    memcpy(node.previousMAC, &data[offset], 6);
-    offset += 6;
-    node.nextMACsCount = data[offset++];
-    // for (uint8_t j = 0; j < node.nextMACsCount; j++)
-    for (uint8_t j = 0; j < 2; j++)
-
-    { // Use nextMACsCount
-      memcpy(node.nextMACs[j], &data[offset], 6);
-      offset += 6;
-    }
-  }
-  return network;
-}
-
 void printMAC(const uint8_t *mac)
 {
   for (int i = 0; i < 6; i++)
@@ -624,13 +704,28 @@ class SettingsCharacteristicCallbacks : public NimBLECharacteristicCallbacks
         //_myNetwork = deserializeNetwork(receivedDataBuffer.data(), expectedSize);
         Serial.printf("Entire msg has been received %d expected %d received\n", expectedSize, receivedDataBuffer.size());
 
-        //R3ENetwork receivedNetwork = deserializeNetwork(receivedDataBuffer.data());
+        // R3ENetwork receivedNetwork = deserializeNetwork(receivedDataBuffer.data());
         _myNetwork = deserializeNetwork(receivedDataBuffer.data());
         // Print the entire receivedNetwork object
         printNetwork(_myNetwork);
+
+        //================================
+        // testing serialization process
+        // Serial.println("Testing serialization process");
+        // std::vector<uint8_t> serializedData = serializeNetwork(_myNetwork);
+        // R3ENetwork testData = deserializeNetwork(serializedData.data());
+        // printNetwork(testData);
+        //================================
+
         receivedDataBuffer.clear();
         // Clear the buffer for the next message
         expectedSize = 0;
+        // init esp-now with new settings
+        initESPNOW();
+        if (_curNode.nextMACsCount > 0)
+        {
+          sendNetwork(_myNetwork);
+        }
       }
     }
   }
@@ -683,50 +778,6 @@ void createBLEServer()
   NimBLEDevice::startAdvertising();
   Serial.println("Waiting for a client connection to notify...");
 }
-
-// Send a file via BLE in chunks
-/*void sendFileViaBLE(fs::FS &fs, String path)
-{
-
-  Serial.printf("Reading file: %s\n", path);
-
-  File file = fs.open(path);
-  // File file = fs.open("/hello.txt");
-
-  if (!file)
-  {
-    Serial.println("Failed to open file for reading");
-    return;
-  }
-
-  const size_t chunkSize = 200; // Size of each chunk (can adjust depending on BLE MTU)
-  uint8_t buffer[chunkSize];
-  size_t bytesRead = 0;
-  size_t totalBytesSent = 0;
-  size_t totalFileSize = file.size(); // Get total file size for progress reporting
-  Serial.printf("File Size : %d\n", totalFileSize);
-
-  // notifify server that the file is comming !!!
-  notifyPictureReadyBLEClient((uint32_t)totalFileSize);
-
-  while (file.available())
-  {
-    // Serial.print(".");
-    bytesRead = file.read(buffer, chunkSize);           // Read chunk from file
-    pictureCharacteristic->setValue(buffer, bytesRead); // Set value to notify
-    pictureCharacteristic->notify();                    // Send notification
-    // pictureReadyCharacteristic->setValue(buffer, bytesRead); // Set value to notify
-    // pictureReadyCharacteristic->notify();                    // Send notification
-
-    totalBytesSent += bytesRead; // Track bytes sent for progress
-    float progress = (float)totalBytesSent / totalFileSize * 100.0f;
-    Serial.printf("Sending file: %.2f%%\n", progress); // Display progress (optional)
-
-    // delay(1000); // Optional delay to avoid flooding the BLE client
-  }
-  file.close(); // Close the file when done
-  Serial.println("File sent via BLE successfully");
-}*/
 
 // Notify the BLE client with the given value
 void notifyBLEClient(int node)
@@ -993,7 +1044,53 @@ void onDataReceived(const uint8_t *mac, const uint8_t *incomingData, int len)
     Message myData;
     memcpy(&myData, incomingData, len);
     processMessage(myData);
+    return;
   }
+  //---
+  if (len == sizeof(NetworkChunk))
+  {
+    Serial.println("Receiving Network Chunk..");
+
+    NetworkChunk chunk;
+    memcpy(&chunk, incomingData, len);
+    if (receivedChunks == 0)
+    // Start of new network data
+    {
+      networkDataBuffer.clear();
+      expectedChunks = chunk.totalChunks;
+    }
+    Serial.printf("Chunk size %d, expected:%d\n", len, expectedChunks);
+
+    // Append chunk data to the buffer
+    networkDataBuffer.insert(networkDataBuffer.end(), chunk.chunkData, chunk.chunkData + len - 2);
+    // networkDataBuffer.insert(networkDataBuffer.end(), chunk.chunkData, chunk.chunkData + sizeof(chunk.chunkData));
+
+    receivedChunks++;
+    // Check if all chunks are received
+    if (receivedChunks == expectedChunks)
+    {
+      // R3ENetwork network = deserializeNetwork(networkDataBuffer.data());
+      _myNetwork = deserializeNetwork(networkDataBuffer.data());
+
+      // processNetwork(network);
+
+      printNetwork(_myNetwork);
+      receivedDataBuffer.clear();
+      // Clear the buffer for the next message
+      expectedSize = 0;
+      // init esp-now with new settings
+      initESPNOW();
+      if (_curNode.nextMACsCount > 0)
+      {
+        sendNetwork(_myNetwork);
+      }
+      // Reset counters
+      receivedChunks = 0;
+      expectedChunks = 0;
+    }
+    return;
+  }
+  //---
 }
 
 // Helper function to process incoming image chunks
@@ -1182,24 +1279,12 @@ void addPeer(uint8_t *address)
   }
 }
 
-// Setup function
-void setup()
+void initESPNOW()
 {
-  Serial.begin(9600);
-  pinMode(PIR_SENSOR_PIN, INPUT);
-  pinMode(LED_PIN, OUTPUT);
-  //=== init ESP NOW ===
-  // Set device as a Wi-Fi Station
-  WiFi.mode(WIFI_STA);
-
-  // Init ESP-NOW
-  if (esp_now_init() != ESP_OK)
-  {
-    Serial.println("Error initializing ESP-NOW");
+  // do not try to change the config without reboot each devices before...
+  if (isESPNOWReady)
     return;
-  }
 
-  //---
   _curNode = FindNode(_myNetwork);
   if (_curNode.nodeID < 0)
     return;
@@ -1208,11 +1293,6 @@ void setup()
                   _curNode.currentMAC[0], _curNode.currentMAC[1], _curNode.currentMAC[2],
                   _curNode.currentMAC[3], _curNode.currentMAC[4], _curNode.currentMAC[5]);
   Serial.println(_curNode.isHub);
-  //---
-
-  // Register send and receive callbacks
-  esp_now_register_send_cb(onDataSent);
-  esp_now_register_recv_cb(onDataReceived);
 
   // Add peers
   if (!_curNode.isHub)
@@ -1221,8 +1301,6 @@ void setup()
   {
     addPeer(_curNode.nextMACs[i]); // Add next node as peer
   }
-  //====================
-
   if (_curNode.hasCam)
   {
     initializeCameraConfig();
@@ -1236,6 +1314,26 @@ void setup()
     esp_camera_fb_return(fb); // Free the frame buffer after sending all chunks
     fb = NULL;
   }
+  isESPNOWReady = true;
+}
+
+// Setup function
+void setup()
+{
+  Serial.begin(9600);
+  pinMode(PIR_SENSOR_PIN, INPUT);
+  pinMode(LED_PIN, OUTPUT);
+  WiFi.mode(WIFI_STA);
+  // Init ESP-NOW
+  if (esp_now_init() != ESP_OK)
+  {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+
+  // Register send and receive callbacks
+  esp_now_register_send_cb(onDataSent);
+  esp_now_register_recv_cb(onDataReceived);
 
   if (false) // keep for futur use (SD Card)
   {
@@ -1285,8 +1383,8 @@ void setup()
   }
 
   // Node 0 needs to notify the client app through BLE
-  if (_curNode.isHub)
-    createBLEServer();
+  // if (_curNode.isHub)
+  createBLEServer();
 }
 
 void loop()
@@ -1298,23 +1396,26 @@ void loop()
     unsigned long currentTime = millis();
     if (currentTime - lastMessageTime > messageInterval)
     {
-      lastMessageTime = currentTime;
-      Serial.println("Sensor motion detected...begin loop");
-      blink(1);
-      if (_curNode.isHub)
+      if (isESPNOWReady)
       {
-        notifyBLEClient(_curNode.nodeID);
+        lastMessageTime = currentTime;
+        Serial.println("Sensor motion detected...begin loop");
+        blink(1);
+        if (_curNode.isHub)
+        {
+          notifyBLEClient(_curNode.nodeID);
+        }
+        else
+        {
+          Message myData;
+          strcpy(myData.text, "MOTION DETECTED");
+          myData.currentNode = _curNode.nodeID;
+          myData.originNode = _curNode.nodeID;
+          sendDataToPreviousDevice(myData);
+        };
+        delay(5000);
+        Serial.println("Sensor motion detected...end of loop");
       }
-      else
-      {
-        Message myData;
-        strcpy(myData.text, "MOTION DETECTED");
-        myData.currentNode = _curNode.nodeID;
-        myData.originNode = _curNode.nodeID;
-        sendDataToPreviousDevice(myData);
-      };
-      delay(5000);
-      Serial.println("Sensor motion detected...end of loop");
     }
   }
   delay(1000);
