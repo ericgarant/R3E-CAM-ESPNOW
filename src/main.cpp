@@ -65,7 +65,7 @@ struct Node
 struct R3ENetwork
 {
   uint8_t nodeCount;
-  Node nodeList[3];
+  std::vector<Node> nodeList; // Dynamic allocation
 };
 
 Node node0 = {
@@ -100,9 +100,14 @@ Node node2 = {
     .nextMACs = {{0}} // Use empty array instead of NULL
 };
 
-R3ENetwork _myNetwork = {
+/*R3ENetwork _myNetwork = {
     .nodeCount = 3,
     .nodeList = {node0, node1, node2},
+};*/
+
+R3ENetwork _myNetwork = {
+    3,                    // nodeCount
+    {node0, node1, node2} // nodeList (vector automatically adapts size)
 };
 
 Node _curNode;
@@ -181,12 +186,15 @@ esp_now_peer_info_t peerInfo;
 NimBLEServer *bleServer = NULL;
 NimBLECharacteristic *motionCharacteristic = NULL;
 NimBLECharacteristic *healthCheckCharacteristic = NULL;
+NimBLECharacteristic *settingsCharacteristic = NULL;
 NimBLECharacteristic *pictureCharacteristic = NULL;
 NimBLECharacteristic *pictureReadyCharacteristic = NULL;
 bool deviceConnected = false;
 bool previousDeviceConnected = false;
 uint32_t notificationValue = 0;
 int imageCounter = 0;
+std::vector<uint8_t> receivedDataBuffer;
+size_t expectedSize = 0;
 
 // BLE UUIDs
 #define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
@@ -194,6 +202,7 @@ int imageCounter = 0;
 #define HEALTH_CHECK_CHARACTERISTIC_UUID "50c07f71-e239-4f5c-825e-2cc13e914778"
 #define PICTURE_CHARACTERISTIC_UUID "0193b6d1-4e1b-745d-ac16-ba9af8fbb405"
 #define PICTURE_READY_CHARACTERISTIC_UUID "2f47b012-ba1d-4a90-b28b-49ca6bcf2a8b"
+#define SETTINGS_CHARACTERISTIC_UUID "a5d24a6f-5fde-494d-8eaf-9b045a6e4f98"
 
 uint8_t *imageRecvBuffer = nullptr;
 bool receivingImage = false;
@@ -453,8 +462,8 @@ void sendDataToNextDevice(const Message &receivedData)
 {
   Serial.println("sendDataToNextDevice ");
 
-  //if (_curNode.nextMACs[0][0] == 0) // no next device
-  //  return;
+  // if (_curNode.nextMACs[0][0] == 0) // no next device
+  //   return;
   for (int i = 0; i < _curNode.nextMACsCount; i++)
   {
     if (esp_now_send(_curNode.nextMACs[i], (uint8_t *)&receivedData, sizeof(receivedData)) != ESP_OK)
@@ -513,6 +522,120 @@ class MyCharacteristicCallbacks : public NimBLECharacteristicCallbacks
   }
 };
 
+R3ENetwork deserializeNetwork(uint8_t *data)
+{
+  R3ENetwork network;
+  size_t offset = 0;
+  network.nodeCount = data[offset++];
+  Serial.printf("Resize node count %d nodes\n", network.nodeCount);
+
+  network.nodeList.resize(network.nodeCount); // Resize dynamically
+  for (uint8_t i = 0; i < network.nodeCount; i++)
+  {
+    Node &node = network.nodeList[i];
+    node.nodeID = data[offset++];
+    node.isHub = data[offset++];
+    node.hasCam = data[offset++];
+    memcpy(node.currentMAC, &data[offset], 6);
+    offset += 6;
+    memcpy(node.previousMAC, &data[offset], 6);
+    offset += 6;
+    node.nextMACsCount = data[offset++];
+    // for (uint8_t j = 0; j < node.nextMACsCount; j++)
+    for (uint8_t j = 0; j < 2; j++)
+
+    { // Use nextMACsCount
+      memcpy(node.nextMACs[j], &data[offset], 6);
+      offset += 6;
+    }
+  }
+  return network;
+}
+
+void printMAC(const uint8_t *mac)
+{
+  for (int i = 0; i < 6; i++)
+  {
+    Serial.printf("%02x", mac[i]);
+    if (i < 5)
+    {
+      Serial.printf(":");
+    }
+  }
+  Serial.println();
+}
+
+void printNetwork(const R3ENetwork &network)
+{
+  Serial.printf("Received Network with %d nodes\n", network.nodeCount);
+  for (uint8_t i = 0; i < network.nodeCount; i++)
+  {
+    Serial.printf("Node %d:\n", network.nodeList[i].nodeID);
+    Serial.printf(" isHub: %d\n", network.nodeList[i].isHub);
+    Serial.printf(" hasCam: %d\n", network.nodeList[i].hasCam);
+    Serial.printf(" currentMAC: ");
+    printMAC(network.nodeList[i].currentMAC);
+    Serial.printf(" previousMAC: ");
+    printMAC(network.nodeList[i].previousMAC);
+    Serial.printf(" nextMACsCount: %d\n", network.nodeList[i].nextMACsCount);
+    // for (uint8_t j = 0; j < network.nodeList[i].nextMACsCount; j++)
+    for (uint8_t j = 0; j < 2; j++)
+
+    {
+      Serial.printf(" nextMACs[%d]: ", j);
+      printMAC(network.nodeList[i].nextMACs[j]);
+    }
+  }
+}
+
+class SettingsCharacteristicCallbacks : public NimBLECharacteristicCallbacks
+{
+  void onWrite(NimBLECharacteristic *pCharacteristic)
+  {
+    std::string rxValue = pCharacteristic->getValue();
+    Serial.printf("Receiving chunk %d bytes\n", rxValue.length());
+
+    if (rxValue.length() > 0)
+    {
+      uint8_t *data = (uint8_t *)rxValue.data();
+      size_t len = rxValue.length();
+      // If the expected size has not been determined, look for the header
+      if (expectedSize == 0 && receivedDataBuffer.size() < 4)
+      {
+        receivedDataBuffer.insert(receivedDataBuffer.end(), data, data + len);
+        // If we have at least 4 bytes, process the header
+        if (receivedDataBuffer.size() >= 4)
+        {
+          expectedSize = (receivedDataBuffer[0] << 24) | (receivedDataBuffer[1] << 16) | (receivedDataBuffer[2] << 8) | receivedDataBuffer[3];
+          Serial.printf("Expected size: %d bytes\n", expectedSize);
+          // Remove the header from the buffer
+          receivedDataBuffer.erase(receivedDataBuffer.begin(), receivedDataBuffer.begin() + 4);
+        }
+      }
+      else
+      {
+        // If the header has already been processed, just append the data
+        Serial.printf("header has already been received %d bytes\n", len);
+        receivedDataBuffer.insert(receivedDataBuffer.end(), data, data + len);
+      }
+      // Check if the entire message has been received
+      if (expectedSize > 0 && receivedDataBuffer.size() >= expectedSize)
+      {
+        //_myNetwork = deserializeNetwork(receivedDataBuffer.data(), expectedSize);
+        Serial.printf("Entire msg has been received %d expected %d received\n", expectedSize, receivedDataBuffer.size());
+
+        //R3ENetwork receivedNetwork = deserializeNetwork(receivedDataBuffer.data());
+        _myNetwork = deserializeNetwork(receivedDataBuffer.data());
+        // Print the entire receivedNetwork object
+        printNetwork(_myNetwork);
+        receivedDataBuffer.clear();
+        // Clear the buffer for the next message
+        expectedSize = 0;
+      }
+    }
+  }
+};
+
 // Create and configure the BLE server
 void createBLEServer()
 {
@@ -535,6 +658,11 @@ void createBLEServer()
       HEALTH_CHECK_CHARACTERISTIC_UUID,
       NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
   healthCheckCharacteristic->setCallbacks(new MyCharacteristicCallbacks());
+
+  settingsCharacteristic = service->createCharacteristic(
+      SETTINGS_CHARACTERISTIC_UUID,
+      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+  settingsCharacteristic->setCallbacks(new SettingsCharacteristicCallbacks());
 
   pictureCharacteristic = service->createCharacteristic(
       PICTURE_CHARACTERISTIC_UUID,
